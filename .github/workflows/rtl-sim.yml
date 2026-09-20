@@ -162,8 +162,12 @@ jobs:
             echo "::error::串口脚本自检未通过"
             exit 1
           fi
-          # 有跳过项就说明覆盖不全，不该悄悄放过
-          if grep -q '跳过' /tmp/serial.log; then
+          # 有跳过项就说明覆盖不全，不该悄悄放过。
+          # ⚠ 判据是**明确的标记字符串** `!! SKIPPED !!`，不是自然语言。
+          #   原因：grep 裸的"跳过"二字会命中小节标题
+          #   「串口筛选（跳过蓝牙幻影口）」—— 把**全过**的测试判成失败。
+          #   （这个检查自己刚踩过一次：日志明明是 10 项全过，却报了 error。）
+          if grep -q '!! SKIPPED !!' /tmp/serial.log; then
             echo "::error::有测试项被跳过 —— 覆盖不完整"
             exit 1
           fi

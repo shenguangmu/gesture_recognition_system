@@ -123,7 +123,7 @@ def test_board_port():
         #   （CI 首次跑这个 job 时就是这么红的：runner 没装 pyserial。）
         global _skipped
         _skipped = 3
-        print("    [跳过] 本机没有 pyserial，这 3 项未执行")
+        print("    !! SKIPPED !! 本机没有 pyserial，这 3 项未执行")
         return
 
     def mk(dev, hwid, desc='', mfg=''):
