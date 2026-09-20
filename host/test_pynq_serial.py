@@ -39,6 +39,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import pynq_serial as ps   # noqa: E402
 
 _p = _f = 0
+_skipped = 0
 
 
 def ck(cond, msg):
@@ -95,18 +96,43 @@ def test_pick_ips():
 
 def test_board_port():
     print("\n[2] 串口筛选（跳过蓝牙幻影口）")
-    print("    ⚠ 需要 pyserial 才能构造端口对象；没有就跳过")
 
+    # ⚠ 不要写 `from serial.tools import list_ports; list_ports.ListPortInfo` ——
+    #   在 pyserial 3.5 里 `ListPortInfo` **不在 list_ports 顶层**
+    #   （它在 list_ports_common 里，且各平台实现可能再包一层）。
+    #   本文件第一版就是这么写的，于是**本机有 pyserial 也照样静默跳过**，
+    #   那 3 项从来没真跑过 —— 是"跳过计数"把它照出来的。
+    #
+    #   改成**问 comports() 要真实类型**：拿它返回的第一个对象
+    #   （没有就退到 list_ports_common），总之与运行时用的是同一个类。
+    PortInfo = None
     try:
         from serial.tools import list_ports
-        PortInfo = list_ports.ListPortInfo
+        got = list_ports.comports()
+        if got:
+            PortInfo = type(got[0])
+        else:
+            from serial.tools.list_ports_common import ListPortInfo
+            PortInfo = ListPortInfo
     except Exception:
-        print("    (跳过：本机没有 pyserial)")
+        PortInfo = None
+
+    if PortInfo is None:
+        # ⚠ 缺 pyserial 时**必须显式说"跳过 N 项"**，不能只默默少跑。
+        #   否则汇总照样报 PASSED —— 覆盖率悄悄缩水而没人知道。
+        #   （CI 首次跑这个 job 时就是这么红的：runner 没装 pyserial。）
+        global _skipped
+        _skipped = 3
+        print("    [跳过] 本机没有 pyserial，这 3 项未执行")
         return
 
     def mk(dev, hwid, desc='', mfg=''):
-        p = PortInfo()
-        p.device, p.hwid, p.description, p.manufacturer = dev, hwid, desc, mfg
+        # ⚠ `ListPortInfo(device)` 的 device 是**必需参数**，
+        #   不能 `ListPortInfo()` 再赋值 —— 那会 TypeError。
+        #   （本测试第一版就是这么写的；因为一直在静默跳过，
+        #     这个错从没暴露过，直到"跳过计数"把它照出来。）
+        p = PortInfo(dev)
+        p.hwid, p.description, p.manufacturer = hwid, desc, mfg
         return p
 
     # 真板卡：USB-SERIAL，不是蓝牙
@@ -132,7 +158,10 @@ def main():
 
     print("\n" + "=" * 69)
     if _f == 0:
-        print("  *** PYNQ_SERIAL TESTS PASSED ***  (%d 项)" % _p)
+        msg = "  *** PYNQ_SERIAL TESTS PASSED ***  (%d 项" % _p
+        if _skipped:
+            msg += "，跳过 %d 项" % _skipped
+        print(msg + ")")
     else:
         print("  *** PYNQ_SERIAL TESTS FAILED ***  (%d 通过, %d 失败)" % (_p, _f))
     print("=" * 69)

@@ -148,12 +148,23 @@ jobs:
             exit 1
           fi
 
+      # ⚠ 装上 pyserial 让 7 项**全部真跑**，而不是跳过 3 项。
+      #   首次跑这个 job 时没装，结果串口脚本的 4 项静默跳过
+      #   （表现是"过了"，实际少测了一半）—— 见 test_pynq_serial.py 的说明。
+      - name: 安装 pyserial（让串口测试项真的执行）
+        run: pip install --quiet pyserial
+
       - name: 串口脚本离线自检
         run: |
           set -o pipefail
           python host/test_pynq_serial.py 2>&1 | tee /tmp/serial.log
           if ! grep -q 'PYNQ_SERIAL TESTS PASSED' /tmp/serial.log; then
             echo "::error::串口脚本自检未通过"
+            exit 1
+          fi
+          # 有跳过项就说明覆盖不全，不该悄悄放过
+          if grep -q '跳过' /tmp/serial.log; then
+            echo "::error::有测试项被跳过 —— 覆盖不完整"
             exit 1
           fi
 

@@ -98,9 +98,27 @@ if getattr(sys.stderr, 'encoding', '').lower() not in ('utf-8', 'utf8'):
 try:
     import serial
     from serial.tools import list_ports
+    _SERIAL = True
 except ImportError:
-    print("  需要 pyserial： pip install --user pyserial")
-    sys.exit(2)
+    # ⚠ 不在这里 sys.exit —— 本模块是**库 + 脚本**两用的。
+    #
+    #   原先写成"import 失败就 sys.exit(2)"，后果是：
+    #   **连它的离线自检都跑不起来**（`test_pynq_serial.py` import 本模块
+    #   时就被那个 exit 带走了，退出码 2）—— 而离线自检测的
+    #   `_pick_ips` 是**纯正则，根本不需要 pyserial**。
+    #   CI 上就是这么红的（runner 没装 pyserial）。
+    #
+    #   改成"用到串口时才报错"：库的部分可以无依赖地 import 和测试，
+    #   只有真要开串口时，才提示装 pyserial。
+    _SERIAL = False
+
+
+def _need_serial(what):
+    """真要用串口时，缺 pyserial 给明确提示（而不是 NameError）"""
+    if not _SERIAL:
+        print("  需要 pyserial 才能%s：" % what)
+        print("      python -m pip install --user pyserial")
+        sys.exit(2)
 
 # ⚠ 蓝牙 SPP 占的幻影口。Windows 上按 InstanceId 判定最可靠
 #   （描述文字在不同系统语言下不一样，InstanceId 里的 BTHENUM 是稳定的）。
@@ -158,6 +176,7 @@ def _pick_ips(text):
 
 def list_ports_cmd():
     """不带参数跑：列出端口，标出哪个是幻影口"""
+    _need_serial("列出串口")
     ports = list_ports.comports()
     if not ports:
         print("  没发现任何串口。")
@@ -187,6 +206,7 @@ def list_ports_cmd():
 
 
 def pick_auto():
+    _need_serial("自动挑串口")
     boards = [p for p in list_ports.comports() if _is_board_port(p)]
     if not boards:
         print("  没有可用串口。先不带参数跑一次看列表：")
@@ -212,6 +232,10 @@ def main():
         return list_ports_cmd()
 
     port = args.port or pick_auto()
+
+    # ⚠ 到这里才真正需要 pyserial —— 上面 list_ports / pick_auto
+    #   各自已经守卫过；走 `--port` 显式指定时会直接落到这里。
+    _need_serial("打开串口 %s" % port)
 
     try:
         ser = serial.Serial(port, args.baud, timeout=0.05)
