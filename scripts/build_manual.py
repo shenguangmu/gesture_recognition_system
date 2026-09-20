@@ -37,10 +37,18 @@ import re
 import sys
 from pathlib import Path
 
-try:
-    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
-except Exception:
-    pass
+# ⚠ 只在**当前不是 UTF-8** 时才包（中文 Windows 控制台是 GBK）。
+#   ⚠⚠ 那个 if 判断不能省：本文件可能被别的脚本 import，或自己 import
+#   别的也会包的模块 —— 两层都包会让它们共享同一 buffer，
+#   其中一层被 GC 时 buffer 被关掉，最后打印汇总时抛
+#   `ValueError: I/O operation on closed file`。
+#   完整说明见 host/README.md「控制台 UTF-8 兜底」一节。
+if getattr(sys.stdout, 'encoding', '').lower() not in ('utf-8', 'utf8'):
+    try:
+        sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8',
+                                      errors='replace')
+    except Exception:
+        pass
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import mdblock  # noqa: E402

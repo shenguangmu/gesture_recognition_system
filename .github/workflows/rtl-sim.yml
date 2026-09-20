@@ -139,6 +139,24 @@ jobs:
             exit 1
           fi
 
+      - name: 静态检查（死代码 / 语法）
+        run: |
+          set -o pipefail
+          python scripts/check_deadcode.py 2>&1 | tee /tmp/dead.log
+          if ! grep -q '0 处问题' /tmp/dead.log; then
+            echo "::error::发现死代码（return 之后还有语句）—— 见上面的行号"
+            exit 1
+          fi
+
+      - name: 串口脚本离线自检
+        run: |
+          set -o pipefail
+          python host/test_pynq_serial.py 2>&1 | tee /tmp/serial.log
+          if ! grep -q 'PYNQ_SERIAL TESTS PASSED' /tmp/serial.log; then
+            echo "::error::串口脚本自检未通过"
+            exit 1
+          fi
+
   # ⚠ 第四个 job：操作手册的渲染校验。
   #   为什么"生成文档"也要进 CI：
   #   build_manual.py 跑完会打印"已生成"，但那**不说明渲染是对的**。

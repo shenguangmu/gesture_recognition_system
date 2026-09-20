@@ -23,16 +23,18 @@
 【终端：PC · Git Bash】              ← 在你的开发机上
 【终端：PYNQ · Jupyter 或串口】       ← 在板子上的 Linux 里
 【终端：串口 · MobaXterm】            ← 串口终端（看启动日志用）
+【终端：PC · 串口】                   ← PC 上的串口终端（仓库自带脚本）
 【终端：仪器 · 万用表】               ← 手持仪器，不是电脑
 ```
 
-四个环境分别是：
+五个环境分别是：
 
 | 标记 | 是什么 | 怎么进去 |
 |---|---|---|
 | **PC · Git Bash** | 你的开发机（有 Vivado/Vitis、仓库源码） | 右键 → Git Bash Here；或用 MobaXterm 的 Local terminal |
 | **PYNQ · Jupyter** | 板子上的 Python | 浏览器开 `http://<板子IP>:9090` |
 | **PYNQ · 串口** | 板子上的命令行（和 Jupyter 是同一个 Linux） | 见 §3.1 |
+| **PC · 串口** | PC 上连板卡串口的终端（就是 §3.1 那个口） | `python host/pynq_serial.py <COM口>` |
 | **仪器** | 万用表 / 示波器 | 手持操作，不需要电脑 |
 
 > ⚠ **PC 和 PYNQ 上都有 Python，但装的东西完全不同**：
@@ -273,6 +275,42 @@ CONFIG.PCW_UIPARAM_DDR_FREQ_MHZ  {533.333}
 > ⚠ **没串口就等于没有眼睛** —— PYNQ 起没起来、卡在哪一步，
 > 全看串口输出。**先把这个弄通再往下**，不要靠"板子上灯亮了"猜。
 
+### 3.1.1 从启动日志里把 IP 抠出来（`host/pynq_serial.py`）
+
+§3.3 要你「看网口 IP」然后去开 `http://<板子IP>:9090`。麻烦在于
+**IP 不一定是你记住的那个**：PYNQ 也可能走 DHCP 分地址，
+不以 `192.168.2.99` 为准。
+
+于是每次都要在一屏启动日志里翻 `eth0: <BROADCAST,...>` 那一行，肉眼找四位数字组。
+日志滚得快，翻过去就得按 Reset 重来。
+
+`host/pynq_serial.py` 把这件事自动化了 —— 它边收日志边匹配，
+**退出时把本次会话出现过的 IP 汇总打印**，并拼好 `http://<ip>:9090`：
+
+【终端：PC · Git Bash】
+
+```bash
+python -m pip install --user pyserial   # 一次性
+python host/pynq_serial.py              # 先列端口，确认板卡是哪个 COM
+python host/pynq_serial.py COM7         # 连（默认 115200-8-N-1）
+python host/pynq_serial.py --auto       # 自动挑端口（跳过蓝牙幻影口）
+```
+
+> **它不取代 MobaXterm**，也不是完整串口终端：没有滚屏回看、没有文件传输。
+> 它只做「日志里找 IP」这一件事。日常用还是 MobaXterm 顺手；
+> **只在"IP 又变了、又要重找"的时候用它**。
+>
+> ### ⚠ 蓝牙串口是幻影口（**这台机器上实际存在**）
+>
+> Windows 上蓝牙 SPP 会占用 `COM3` / `COM4` 这类**低编号**端口，
+> 在端口列表里长得和板卡一模一样。选错了会以为是板卡没反应。
+>
+> 本机实测：`COM3` / `COM4` **都是蓝牙**，真正的板卡是 FTDI 芯片，
+> 描述里应该出现 **`USB Serial Port`**。
+> 脚本按 InstanceId 里的 `BTHENUM` 把它们标成 `[蓝牙]`，`--auto` 时跳过。
+>
+> **看不到 `USB Serial Port` 先查驱动**，不要怀疑板卡。
+
 ### 3.2 光一个指示灯就能砍掉一半问题
 
 | 观察 | 含义 |
@@ -296,6 +334,9 @@ password: xilinx
 # 看网口 IP（PC 与板子同网段）
 ifconfig
 ```
+
+**这一步也可以用 §3.1.1 的脚本代替** —— 它会在退出时把日志里的 IP 汇总打印，
+省掉肉眼翻屏。手动敲 `ifconfig` 当然也可以。
 
 浏览器开 `http://<板子IP>:9090` → Jupyter。或者直接用串口跑 Python。
 

@@ -1,6 +1,10 @@
 # host 索引
 
-> PC 侧工具。三个文件各管一件事 —— **互相独立，可以单独用**。
+> PC 侧工具。几个文件各管一件事 —— **互相独立，可以单独用**。
+>
+> ⚠ **`bringup_check.py` 和 `pynq_serial.py` 不在下面那个数据流里** ——
+> 它俩服务的是**上板当天**（板子起没起来、IP 是多少），不是算法本身。
+> 见 `docs/board-bringup-guide.md` §3.1.1 / §5。
 
 ## 三个工具的关系
 
@@ -19,6 +23,8 @@
 | `gesture_golden.py` | **PC** | 预处理链的 Python 参考实现 |
 | `dump_frame.py` | **PC + 板** | 帧数据的转储、比对、出图 |
 | `gesture_overlay.py` | **板（PYNQ）** | 加载 overlay、驱动整条流水线 |
+| `pynq_serial.py` | **PC** | 串口控制台，从启动日志里抠板卡 IP |
+| `bringup_check.py` | **板（PYNQ）** | 分步验证（DDR / 预处理链） |
 
 ---
 
@@ -128,6 +134,33 @@ g.show()                           # Jupyter 里出图
 
 ---
 
+## pynq_serial.py —— 串口控制台（上板当天用）
+
+```bash
+pip install --user pyserial
+python pynq_serial.py            # 列端口，确认板卡是哪个 COM
+python pynq_serial.py COM7       # 连（默认 115200-8N1）
+python pynq_serial.py --auto     # 自动挑端口（跳过蓝牙幻影口）
+```
+
+**它只做一件事**：边收启动日志边匹配 IP，**退出时汇总打印** `http://<ip>:9090`。
+这解决了 `docs/board-bringup-guide.md` §3.3 的痛点 ——
+PYNQ 的 IP 不一定是你记住的 `192.168.2.99`（可能走 DHCP），
+而启动日志滚得快，肉眼翻 `eth0:` 那一行翻过去就得按 Reset 重来。
+
+> **不是完整串口终端**：没有滚屏回看、没有文件传输。
+> 日常还是用 MobaXterm（§3.1 推荐），**只在"IP 又变了、又要重找"时用它**。
+
+### ⚠ 蓝牙串口是幻影口
+
+Windows 上蓝牙 SPP 会占用 `COM3` / `COM4` 这类**低编号**端口，
+长得和板卡一模一样，**选错会以为是板卡没反应**。
+
+真正的板卡是 **FTDI** 芯片，描述里应出现 `USB Serial Port`。
+看不到它先查驱动，不要怀疑板卡。脚本按 InstanceId 里的 `BTHENUM` 标记/跳过。
+
+---
+
 ## 三个工具的共同约定
 
 参数常量（尺寸、寄存器偏移）都**硬写在各自文件里**，来源是：
@@ -142,3 +175,40 @@ g.show()                           # Jupyter 里出图
 这些值在 `gesture_golden.py` / `gesture_overlay.py` / `dump_frame.py`
 里各自定义了一遍 —— 是有意为之：**三个工具要能独立运行**，
 不依赖共享模块（那样任一文件缺失就全不能用）。
+
+### ⚠ 控制台 UTF-8 兜底：**只在自己是最外层时才包**
+
+`host/` 与 `scripts/` 下的脚本都在开头包了一层 UTF-8
+（中文 Windows 控制台是 GBK，打印 `⚠` `→` 会直接 `UnicodeEncodeError`）：
+
+```python
+if getattr(sys.stdout, 'encoding', '').lower() not in ('utf-8', 'utf8'):
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+```
+
+**⚠⚠ 那个 `if` 判断不能省。** 省了会踩这个坑：
+
+```
+调用方先包一层     →  sys.stdout = W1(裸 buffer)
+被 import 的模块再包  →  W2 = W1.buffer 又包一层
+```
+
+两层 wrapper 共享同一个底层 buffer，**其中一层被 GC 回收时会把 buffer
+一起关掉**，于是调用方最后打印汇总时抛：
+
+```
+ValueError: I/O operation on closed file
+```
+
+**2026-09-19 实际踩过**：`python host/test_pynq_serial.py`
+（不带 `PYTHONIOENCODING=utf-8`）必崩 ——
+测试模块先包了一层，它 import 的 `pynq_serial` 又包了一层。
+加上 `PYTHONIOENCODING=utf-8` 就正常，因为那种情况下第一层不会执行。
+
+> **这条之所以值得单独写**：当时项目里 **7 个脚本**各自复制了这段代码，
+> **5 个没有防护**。而且它只在"被 import"时才发作 ——
+> 单独跑那个脚本永远测不出来。
+>
+> **没有抽成共享模块**，理由与上面一致：`host/` 和 `scripts/` 是两个目录，
+> 跨目录 import 要额外塞 `sys.path`，**比重复两行守卫更脆**。
+> 真正值钱的是这段解释，不是那两行代码。

@@ -77,6 +77,22 @@ def _c(ok, msg):
     return ok
 
 
+def _fail():
+    """记一次失败并返回 False（给不在 _c() 调用链上的早退用）
+
+    ⚠ 定义在**模块级**，不能塞在某个函数中间 ——
+      初版把它插进了 `step2_ddr()` 里，把那个函数截成两半，
+      `import numpy` 之后整段变成**永远执行不到的死代码**。
+      而当时 `--step 2` 的试跑是**通过**的（无板环境走早退分支，
+      在断点之前就 return 了），所以没暴露。
+      教训：**"跑过一次没报错"覆盖不到被截断的代码路径** ——
+      板到那天真跑 ② 的时候才会发现。
+    """
+    global _failed
+    _failed += 1
+    return False
+
+
 # =====================================================================
 def step2_ddr():
     """② DDR 与 buffer 基本自检 —— 不需要摄像头，不需要 overlay
@@ -96,13 +112,6 @@ def step2_ddr():
         #   （这个 bug 在本脚本第一版里真实存在过，被 --step 2 的试跑抓到。）
         print("    [FAIL] 连 pynq 都 import 不了 —— 你确定在板上跑？")
         return _fail()
-
-
-def _fail():
-    """记一次失败并返回 False（给不在 _c() 调用链上的早退用）"""
-    global _failed
-    _failed += 1
-    return False
 
     import numpy as np
 
