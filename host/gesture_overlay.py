@@ -130,6 +130,26 @@ DMA_CR_RESET   = 0x0004
 DMA_SR_HALTED  = 0x0001
 DMA_SR_IDLE    = 0x0002
 
+
+def _dma_sr_str(sr):
+    """把 AXI DMA 的 DMASR 拆成可读文字（错误位优先）
+
+    ⚠ 位定义来自 PG021。**bit1 是 IDLE（1=空闲），不是完成位** ——
+      2026-09-21 的诊断脚本就是把它当完成位用，导致结论整个跑偏。
+      **完成**是 bit12 `IOC_Irq`。
+
+    仅用于**超时时的现场快照**，正常运行路径不调用。
+    """
+    bits = [
+        (0x0001, 'HALTED'), (0x0002, 'IDLE'), (0x0010, 'DMAIntErr'),
+        (0x0020, 'DMASlvErr'), (0x0040, 'DMADecErr'),
+        (0x1000, 'IOC_Irq'), (0x2000, 'Dly_Irq'), (0x4000, 'Err_Irq'),
+    ]
+    if sr == 0xFFFFFFFF:
+        return '!! 读回全 1 —— 该地址可能不在总线上'
+    hit = [n for m, n in bits if sr & m]
+    return (', '.join(hit) if hit else '（无标志位）') + ' [0x%08X]' % sr
+
 # ⚠⚠ 有符号参数写进 32 位 AXI-Lite 寄存器时的**位宽**问题（2026-09-18 修的 bug）
 #
 #   `thresh_offset` 在 HLS 侧是 `int`（s_axilite，32 位）。所以：
@@ -369,13 +389,33 @@ class GesturePipeline(object):
               % (roi_x, roi_y, roi_w, roi_h, gain, thresh_offset))
 
     # -----------------------------------------------------------------
-    def _soft_reset_dma(self, base, sr_off, cr_off, timeout=1.0):
-        """软复位一个 DMA 通道"""
+    def _soft_reset_dma(self, base, sr_offs, cr_off, timeout=1.0):
+        """软复位一个 DMA 通道
+
+        `sr_offs` 是**候选偏移的列表**。
+
+        ⚠ 背景：BD 里 `dma_in` 是纯 MM2S、`dma_out` 是纯 S2MM
+          （`bd_video.tcl` 的 `c_include_mm2s` / `c_include_s2mm`），
+          调用点按角色传的偏移**本来就是对的**。
+
+          但 `.hwh` 对**两个 IP 都列出了 MM2S 与 S2MM 两套寄存器**
+          （那是 IP 的完整寄存器表，不反映实际使能的通道）。
+          万一哪天通道配错、或 Pynq 的 `DMA` 对象把通道认反，
+          **读错的偏移会返回恒定垃圾值** → `DMA_SR_HALTED` 判据失效 →
+          **复位看似成功、实则没发生**，最后表现为 `ap_done` 超时。
+          这个故障模式**静默**，最难查。
+
+        → 所以同时盯所有候选，**哪个先出现 `HALTED` 就认哪个**。
+          正确配置下行为不变，配错时也能自愈，且不必先知道答案。
+        """
         base.write(cr_off, DMA_CR_RESET)
         t0 = time.time()
-        while base.read(sr_off) & DMA_SR_HALTED == 0:
-            if time.time() - t0 > timeout:
-                raise RuntimeError("DMA 复位超时")
+        while time.time() - t0 < timeout:
+            if any(base.read(o) & DMA_SR_HALTED for o in sr_offs):
+                return                      # 有一个通道报了 HALTED，复位成功
+        raise RuntimeError(
+            "DMA 复位超时（在偏移 %s 上都未见 HALTED）"
+            % ", ".join("0x%02X" % o for o in sr_offs))
 
     def run_once(self, timeout=5.0):
         """跑一帧：DDR(640x480) -> 96x96 灰度
@@ -405,8 +445,12 @@ class GesturePipeline(object):
         self.in_buf.flush()
 
         # 0b. 复位两个 DMA
-        self._soft_reset_dma(din,  DMA_MM2S_DMASR, DMA_MM2S_DMACR)
-        self._soft_reset_dma(dout, DMA_S2MM_DMASR, DMA_S2MM_DMACR)
+        #     ⚠ 传候选列表：正确配置下首项即命中，行为不变；
+        #       万一通道认反，也不会静默漏掉（见 _soft_reset_dma 说明）。
+        self._soft_reset_dma(din,  [DMA_MM2S_DMASR, DMA_S2MM_DMASR],
+                             DMA_MM2S_DMACR)
+        self._soft_reset_dma(dout, [DMA_S2MM_DMASR, DMA_MM2S_DMASR],
+                             DMA_S2MM_DMACR)
 
         # 1. ⚠ 先武装 S2MM
         dout.write(DMA_S2MM_DSTADDR, self.out_buf.physical_address)
@@ -418,6 +462,26 @@ class GesturePipeline(object):
         din.write(DMA_MM2S_DMACR, DMA_CR_RUNSTOP)
         din.write(DMA_MM2S_LENGTH, IN_BYTES)
 
+        # ⚠ 启动后**立刻读回 LENGTH** —— 这是关键诊断。
+        #
+        #   2026-09-21 实测：超时后 dump 里 `dma_in` 的 LENGTH 读回 **8192**，
+        #   而写入的是 614400。必须区分两种可能：
+        #
+        #     (a) 长度没写进去 → DMA 只搬了 8192 或别的量
+        #     (b) 写进去了，读回的是**剩余量**（AXI DMA 传输中该寄存器
+        #         语义会变）→ 8192 = 没搬完的零头
+        #
+        #   在这里（刚写完、传输刚开始）读一次，与超时后的值对比即可判定：
+        #     · 立刻读 = 614400 且超时后 = 8192  → (b) 剩余量，正常
+        #     · 立刻读 = 8192                        → (a) 写没进去 ← 真 bug
+        _len_now_din  = din.read(DMA_MM2S_LENGTH)
+        _len_now_dout = dout.read(DMA_S2MM_LENGTH)
+        print("  启动回读: dma_in LENGTH=%d (写 %d) %s | dma_out LENGTH=%d (写 %d) %s"
+              % (_len_now_din, IN_BYTES,
+                 'OK' if _len_now_din == IN_BYTES else '⚠ 不符',
+                 _len_now_dout, OUT_BYTES,
+                 'OK' if _len_now_dout == OUT_BYTES else '⚠ 不符'))
+
         # 3. 最后 ap_start
         c = p.read(REG_CTRL)
         p.write(REG_CTRL, c | CTRL_AP_START)
@@ -427,12 +491,19 @@ class GesturePipeline(object):
         t0 = time.time()
         while not (p.read(REG_CTRL) & CTRL_AP_DONE):
             if time.time() - t0 > timeout:
+                # ⚠⚠ 超时现场快照 —— 这是**唯一**能看到"卡在哪"的机会。
+                #
+                #   2026-09-21 首次上板实测时，这里只打印了四条"查摄像头"
+                #   的提示，而 ③ 这一步**根本不接摄像头**（输入来自 DDR）。
+                #   结果整场排查都在猜"DMA 到底启动没有"，
+                #   却从没在故障发生的那一刻读过它的寄存器。
+                #   别人的提示只会把人带向错误方向 —— 换成实际读到的值。
+                self._dump_failure(p, din, dout)
                 raise RuntimeError(
-                    "等 ap_done 超时。排查：\n"
-                    "  1) io_xclk 有没有 24MHz（Clocking Wizard 输出）\n"
-                    "  2) io_scl 有没有在跑（SCCB 在工作）\n"
-                    "  3) io_pclk 有没有波形（有=摄像头配好了）\n"
-                    "  4) 摄像头寄存器表是不是还是占位表")
+                    "等 ap_done 超时（%.1fs）。上方已打印故障现场的寄存器快照，"
+                    "按那里的判读走。\n"
+                    "  ⚠ 本步骤**不接摄像头**，不要往那个方向查。"
+                    % timeout)
         dt = time.time() - t0
 
         # 5. 清 ap_start
@@ -445,6 +516,94 @@ class GesturePipeline(object):
 
         print("跑完一帧，耗时 %.3f s" % dt)
         return dt
+
+    # -----------------------------------------------------------------
+    def _dump_failure(self, p, din, dout):
+        """超时现场快照：把 IP 与两个 DMA 的寄存器全打出来
+
+        **这是排查超时的唯一有效手段** —— 故障现场只有一次，
+        把状态记下来，比事后写一堆探针去猜有意义得多。
+
+        ⚠ 只读寄存器，不改任何状态。可以在 `run_once` 失败后直接调用。
+        """
+        print("\n" + "!" * 69)
+        print("  故障现场快照（超时时刻的寄存器）")
+        print("!" * 69)
+
+        # ---- 先打物理地址：地址不对的话，后面全是垃圾 ----
+        #    ⚠ 用 ip_dict 里的 'phys_addr' 键 —— 2026-09-21 在板上实测确认过
+        #      这个版本的 ip_dict 里有它（当时 `print_info` 读的
+        #      `base_addr` 键**不存在**，所有地址都打印成 0，误导过一轮）。
+        print("\n  [地址]")
+        try:
+            for name, info in sorted(self.ol.ip_dict.items()):
+                pa = info.get('phys_addr')
+                print("    %-20s phys = %s"
+                      % (name, ('0x%08X' % pa) if pa is not None else '(无 phys_addr 键)'))
+        except Exception as e:
+            print("    取地址失败: %s" % e)
+
+        # ---- IP ----
+        print("\n  [IP gesture_preproc]")
+        try:
+            c = p.read(REG_CTRL)
+            print("    CTRL  = 0x%08X  [ap_start=%d ap_done=%d ap_idle=%d ap_ready=%d]"
+                  % (c, c & 1, (c >> 1) & 1, (c >> 2) & 1, (c >> 3) & 1))
+            print("    ISR   = 0x%08X   (bit0 是 ap_done 的粘滞标志)"
+                  % p.read(REG_ISR))
+            print("    参数回读（确认真写进去了，0 值会让 HLS 判非法）：")
+            for reg, nm in [(REG_WIDTH, 'width'), (REG_HEIGHT, 'height'),
+                            (REG_THRESH_MODE, 'thresh_mode'),
+                            (REG_THRESH_OFFSET, 'thresh_offset'),
+                            (REG_ROI_X, 'roi_x'), (REG_ROI_Y, 'roi_y'),
+                            (REG_ROI_W, 'roi_w'), (REG_ROI_H, 'roi_h')]:
+                print("      %-14s = 0x%08X" % (nm, p.read(reg)))
+        except Exception as e:
+            print("    读 IP 失败: %s" % e)
+
+        # ---- 两个 DMA ----
+        print("\n  [DMA]")
+        for nm, ip, cr, sr, addr_o, len_o in [
+                ('dma_in (MM2S)', din,  DMA_MM2S_DMACR, DMA_MM2S_DMASR,
+                 DMA_MM2S_SRCADDR, DMA_MM2S_LENGTH),
+                ('dma_out(S2MM)', dout, DMA_S2MM_DMACR, DMA_S2MM_DMASR,
+                 DMA_S2MM_DSTADDR, DMA_S2MM_LENGTH)]:
+            try:
+                crv, srv = ip.read(cr), ip.read(sr)
+                print("    %s" % nm)
+                print("      DMACR  = 0x%08X  (bit0 RS=%d, 应锁存为 1)"
+                      % (crv, crv & 1))
+                print("      DMASR  = %s" % _dma_sr_str(srv))
+                # ⚠ 地址与长度也要打 —— 只看到 "已武装" 不够，
+                #   长度写错的话它会武装上但永远收不满，表现和"没数据"一样。
+                print("      ADDR   = 0x%08X" % ip.read(addr_o))
+                print("      LENGTH = %d 字节" % ip.read(len_o))
+            except Exception as e:
+                print("    %s 读失败: %s" % (nm, e))
+
+        # ---- 判读 ----
+        print("\n  [判读]")
+        print("    · DMACR 的 RS 位没锁存 → 写没生效，AXI-Lite 路径有问题")
+        print("    · DMASR 报 HALTED       → DMA 拒绝启动")
+        print("    · DMASR 报 IDLE         → 通道空闲")
+        print("        - 带 IOC_Irq  → **传输已完成过**（数据搬完了）")
+        print("        - 无 IOC_Irq  → 空转，没有数据可搬")
+        print("    · DMASR 报 *Err         → 总线访问出错，查 ic_hp3/地址映射")
+        print("    · LENGTH 与预期不符     → 长度写错，会武装上但永远收不满")
+        print("    · 参数回读为 0          → config() 没生效，HLS 会走提前返回")
+        print("!")
+        print("    【怎么用这份快照】")
+        print("      先看 LENGTH 与写入值是否相符 —— 2026-09-21 的实例就是")
+        print("      `写 614400 读回 8192`（= 写入 mod 16384），")
+        print("      根因是 BD 里 AXI DMA 的 `c_sg_length_width` 用了默认的")
+        print("      14 位（单次传输上限 16383 字节）。见 skill/pitfalls P10。")
+        print("!")
+        print("      其它常见组合：")
+        print("        CTRL.ap_start=0 且 ap_idle=1  → IP 没被启动")
+        print("        CTRL.ap_start=1 且 ap_idle=0  → IP 在跑（正常，等 done）")
+        print("        DMASR 带 *Err                 → 总线地址问题")
+        print("        dma_out 无 IOC 而 dma_in 有   → 上游没吐出数据")
+        print("!" * 69 + "\n")
 
     # -----------------------------------------------------------------
     def get_result(self):

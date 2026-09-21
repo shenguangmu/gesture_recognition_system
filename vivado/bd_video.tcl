@@ -371,10 +371,26 @@ if {$has_gesture} {
 
     # ---- 8.2 输入 DMA：DDR → 预处理 ----
     # MM2S 读 614400 字节（640*480*2），Stream 位宽 16（RGB565）
+    #
+    # ⚠⚠ `c_sg_length_width` **必须显式设置** —— 2026-09-21 上板实测踩的坑：
+    #
+    #   不设的话 IP 用默认值 **14 位**，即单次传输最多 2^14-1 = **16383** 字节。
+    #   而我们要传 614400 字节（是上限的 37 倍）。
+    #
+    #   症状（全部静默，不报任何错）：
+    #     · 写 LENGTH=614400 → 读回 **8192**（= 614400 mod 16384，高位被丢）
+    #     · DMA 只搬前 16384 字节就"完成"（IOC_Irq 置位，看起来一切正常）
+    #     · 下游 IP 永远等不到剩余的输入 → 整条 DATAFLOW 卡死
+    #     · ap_done 永不置位 → 表现为"跑一帧超时"
+    #
+    #   ⚠ csim / cosim **查不出来** —— 仿真里没有真实的 AXI DMA 长度寄存器。
+    #   24 位 = 16 MB 上限，对 640x480 RGB565（614400 B）留足余量。
+    #   见 skill/pitfalls/README.md P10。
     set dma_in [create_bd_cell -type ip -vlnv xilinx.com:ip:axi_dma dma_in]
     set_property -dict [list \
         CONFIG.c_include_sg                  {0} \
         CONFIG.c_sg_include_stscntrl_strm    {0} \
+        CONFIG.c_sg_length_width             {24} \
         CONFIG.c_include_mm2s                {1} \
         CONFIG.c_include_s2mm                {0} \
         CONFIG.c_m_axi_mm2s_data_width       {32} \
@@ -384,10 +400,13 @@ if {$has_gesture} {
 
     # ---- 8.3 输出 DMA：预处理 → DDR ----
     # S2MM 写 9216 字节（96*96），Stream 位宽 8（灰度）
+    # ⚠ 同样要设 c_sg_length_width：9216 虽然没超 16383，
+    #   但两个 DMA 保持一致的配置，避免以后改输出尺寸时重踩同一个坑。
     set dma_out [create_bd_cell -type ip -vlnv xilinx.com:ip:axi_dma dma_out]
     set_property -dict [list \
         CONFIG.c_include_sg                  {0} \
         CONFIG.c_sg_include_stscntrl_strm    {0} \
+        CONFIG.c_sg_length_width             {24} \
         CONFIG.c_include_mm2s                {0} \
         CONFIG.c_include_s2mm                {1} \
         CONFIG.c_m_axi_s2mm_data_width       {32} \

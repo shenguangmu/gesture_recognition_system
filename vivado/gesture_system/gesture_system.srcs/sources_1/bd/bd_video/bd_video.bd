@@ -913,7 +913,7 @@
       },
       "gesture_preproc_0": {
         "vlnv": "user:hls:gesture_preproc:1.0",
-        "ip_revision": "2114788877",
+        "ip_revision": "2114791946",
         "xci_name": "bd_video_gesture_preproc_0_0",
         "xci_path": "ip\\bd_video_gesture_preproc_0_0\\bd_video_gesture_preproc_0_0.xci",
         "inst_hier_path": "gesture_preproc_0",
@@ -944,6 +944,9 @@
           },
           "c_mm2s_burst_size": {
             "value": "64"
+          },
+          "c_sg_length_width": {
+            "value": "24"
           }
         },
         "interface_ports": {
@@ -998,6 +1001,9 @@
           },
           "c_s_axis_s2mm_tdata_width": {
             "value": "8"
+          },
+          "c_sg_length_width": {
+            "value": "24"
           }
         },
         "interface_ports": {

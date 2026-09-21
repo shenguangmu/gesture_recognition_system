@@ -153,7 +153,7 @@ def step3_pipeline(bitfile=None):
         from gesture_overlay import GesturePipeline
     except ImportError as e:
         print("    [FAIL] import gesture_overlay 失败：%s" % e)
-        return False
+        return _fail()          # ⚠ 必须走 _fail()，裸 return False 会漏记账（见 P6）
 
     ok = True
 
@@ -165,7 +165,7 @@ def step3_pipeline(bitfile=None):
         print("    [FAIL] overlay 加载/认 IP 失败：%s" % e)
         print("       → 若报『没找到这些 IP』，对照上面列出的实际 IP 名调整匹配")
         print("       → 若报『歧义』，说明 dma_in/dma_out 名字互相命中")
-        return False
+        return _fail()          # ⚠ 必须走 _fail()，裸 return False 会漏记账（见 P6）
 
     gp.print_info()
     ok &= _c(True, "overlay 加载成功，三个 IP 都认到了")
@@ -185,7 +185,7 @@ def step3_pipeline(bitfile=None):
     except Exception as e:
         ok &= _c(False, "配置失败：%s" % e)
         print("       ⚠ 若回读是 248 而不是 -8，说明有符号补码位宽写错了")
-        return False
+        return _fail()          # ⚠ 必须走 _fail()，裸 return False 会漏记账（见 P6）
 
     # ---- 3d. 填测试图并跑一帧 ----
     print("\n  [3d] 填测试图案并跑一帧")
@@ -201,7 +201,7 @@ def step3_pipeline(bitfile=None):
         print("        1) overlay 是不是加载对了版本（.hwh 与 .bit 要配套）")
         print("        2) ip_dict 里的地址与 hwh 一致吗（print_info 已打印）")
         print("        3) dma_in/dma_out 有没有认反（认反了会死锁）")
-        return False
+        return _fail()          # ⚠ 必须走 _fail()，裸 return False 会漏记账（见 P6）
 
     # ---- 3e. 检查输出不是常量 ----
     print("\n  [3e] 检查输出（关键：不能是常量）")
