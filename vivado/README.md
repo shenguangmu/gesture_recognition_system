@@ -233,12 +233,13 @@ PS 侧流程：
 
 ---
 
-## ⚠ 踩过的 20 个坑（都在脚本注释里）
+## ⚠ 踩过的 23 个坑（都在脚本注释里）
 
 这些坑的共同特点：**错误信息与真正原因不在同一处**，或者**综合能过、上板才炸**。
 
-> **第 20 条是 2026-09-21 首次上板实测补的 —— 也是本项目排查耗时最长的一条。**
-> 前 19 条都是"综合/实现阶段能看出不对劲"，第 20 条**连上板都跑得"看起来正常"**。
+> **第 20~23 条是上板实测补的** —— 本项目排查耗时最长的一组。
+> 20/21 同族：**参数没生效、不报错**；22 是：**推理自洽但结论错**；
+> 23 是：**改对了约束，反而暴露出被掩盖的物理冲突**。
 
 ### 1. `c_s_axis_s2mm_tdata_width` 是只读参数
 报 `[BD 41-737] Cannot set the parameter ... It is read-only`。
@@ -631,6 +632,156 @@ unzip -p <XSA> bd_video.hwh | grep -i "SG_LENGTH_WIDTH"   # 期望 = 24
 > ⚠⚠ **修复前的比特流全部作废**：`v0.2-bitstream-ok` 与 `v0.3-board-ready`
 > 两个 tag 的比特流都带这个 bug，**上板必坏**。
 > 必须用 **`a4eabe6` 及之后**的比特流。
+
+---
+
+### 21. BD 里设的 IP 参数**没生效**，只给 WARNING —— XCLK 因此不出
+
+> **来源**：2026-09-22。摄像头不出图的**最终根因**。
+> **与坑 20 完全同族**：参数没进去、不报错、只在硬件上表现为怪现象。
+
+**现象**：摄像头通路全死 —— XCLK 无输出 → SCCB 无 ACK（`cfg_error=1`）
+→ 不出图 → VDMA 帧计数恒 1。**FPGA 侧没有任何报错。**
+
+**根因**：`bd_video.tcl` 里给 Clocking Wizard 设 MMCM 参数，想避开
+VCO 顶着 -1 速度等级上限：
+
+```tcl
+CONFIG.PRIMITIVE             {MMCM} \
+CONFIG.MMCM_CLKFBOUT_MULT_F  {6.000} \      # ← 被静默丢弃
+CONFIG.MMCM_DIVCLK_DIVIDE    {1} \          # ← 被静默丢弃
+CONFIG.MMCM_CLKOUT0_DIVIDE_F {25.000} \     # ← 被静默丢弃
+```
+
+IP **根本不给改 M/O**，因为缺少开关：
+
+```
+WARNING: [IP_Flow 19-3374] An attempt to modify the value of
+  disabled parameter 'MMCM_CLKFBOUT_MULT_F' from '50.250' to '6.000'
+  has been ignored
+```
+
+**只给 WARNING，不给 ERROR。** 值直接丢弃，工具照用自己求解器的结果
+（自动选了 VCO ≈ 1005 MHz，贴着上限）。
+
+**⭐ 正确写法 —— 必须开 `OVERRIDE_MMCM`**：
+
+```tcl
+CONFIG.PRIMITIVE      {MMCM} \
+CONFIG.OVERRIDE_MMCM  {true} \      # ← 缺了它，下面三行全是废的
+CONFIG.MMCM_CLKFBOUT_MULT_F  {6.000} \
+CONFIG.MMCM_DIVCLK_DIVIDE    {1} \
+CONFIG.MMCM_CLKOUT0_DIVIDE_F {25.000} \
+```
+
+**⚠ 三个误导性的中间尝试（都失败，别重走）**：
+
+| 试过 | 结果 |
+|---|---|
+| 把 MMCM_* 和 PRIMITIVE 放**同一个** `-dict` | ❌ 仍被忽略 |
+| **拆成两步** `set_property`（先 PRIMITIVE 再 MMCM_*） | ❌ 仍被忽略 |
+| 设 `USE_FREQ_SYNTH=false` | ⚠ 只解开 `DIVCLK_DIVIDE`，**M/O 仍被拒** |
+
+**`OVERRIDE_MMCM` 在常规配置界面里不明显** —— 最后是靠打印
+**完整属性表**才找到的：
+
+```tcl
+report_property -all $cw | grep -iE "OVERRIDE|MULT|DIVIDE"
+```
+
+**验证命令**（写完必跑）：
+
+```tcl
+# ① 回读断言 —— 别信"没报错就是设上了"
+foreach {p want} {MMCM_CLKFBOUT_MULT_F 6.000 MMCM_DIVCLK_DIVIDE 1} {
+    set got [get_property CONFIG.$p $cw]
+    if {[expr {abs(double($got)-$want)}] > 0.001} { error "$p 未生效：$got" }
+}
+# ② 看日志有没有 19-3374
+#    grep "19-3374" <build>.log     有输出 = 参数被丢了
+```
+
+> **一般化**：**"设了属性"和"属性生效了"是两件事。**
+> 凡是 IP 参数，**设完必须回读断言**。本项目已被这类坑咬过三次：
+> `C_SG_LENGTH_WIDTH`（坑 20）、`C_PROBE{N}_WIDTH`、以及本条。
+> 它们的共同点：**只给 WARNING** —— 而 WARNING 在几千行的构建日志里
+> 根本不会有人看。
+
+---
+
+### 22. 引脚映射靠"推理"而非**实物丝印** —— 14 个信号全错位
+
+> **来源**：2026-09-22。摄像头不出图的**真正根因**。详见
+> `skill/pitfalls/README.md` **P12**（同一件事的详细版）。
+
+`video_io.xdc` 的映射是从**原理图画法***推理*出来的（"左列 12→7"的
+非标准画法 → 选"镜像解读"）。**推理错了。**
+
+**决定性证据是实物丝印**：
+
+```
+PMOD A 丝印： 1 NC  2 PCLK  3 HREF  4 SCL   5 GND  6 3V3
+              7 NC  8 XCLK  9 VSYNC 10 SDA  11 GND 12 3V3
+```
+
+`5/6/11/12 = GND/VCC/GND/VCC` —— **正是 Pmod 规范的标准位置**，
+而"镜像"解读会把电源推到 5/6/7/8，两者不相容。**模块用的是标准编号。**
+
+结果 14 个信号全错，其中 6 个接到**空脚**上：
+
+| 信号 | 应接 | 实际接到 |
+|---|---|---|
+| XCLK | U19 (pin 8) | Y18 = **pin 1 = NC** |
+| PCLK | Y19 (pin 2) | U18 = **pin 7 = NC** |
+| HREF | Y16 (pin 3) | U19 = pin 8 |
+| VSYNC | W18 (pin 9) | Y19 = pin 2 |
+| SCL | Y17 (pin 4) | W18 = pin 9 |
+| SDA | W19 (pin 10) | Y16 = pin 3 |
+
+**⭐ 交叉验证**：正确映射下未用的 **Y18/U18** 恰好对应模块 **pin1/pin7 = NC**。
+
+> **教训**：**丝印 > 原理图推理**。丝印是实物标注，不需要推理；
+> "从画法推断针号"引入了额外假设，**假设错了不会报错，只会让后续全错**。
+
+---
+
+### 23. 引脚位置与 FPGA **时钟专用脚不相交** → 布线失败
+
+> **来源**：2026-09-22。**修好坑 22 之后才暴露出来**的独立问题。
+
+**现象**（⚠ 注意：**综合能过，实现直接失败**）
+
+```
+ERROR: [Place 30-574] Poor placement for routing between an IO pin and BUFG
+  Clock Rule: rule_gclkio_bufg   Status: FAILED
+  Rule Description: An IOB driving a BUFG must use a CCIO in the
+                    same half side (top/bottom) of chip as the BUFG
+ERROR: [Place 30-99] Placer failed with error: 'IO Clock Placer failed'
+```
+
+**根因**：PCLK 在模块 **pin2 → ja[1] → Y19**（普通 IO），
+但 Pmod A 上能驱动 BUFG 的 **CCIO 脚只有 U18/U19**，
+而它们在模块上分别是 **pin7=NC** 和 **pin8=XCLK**。
+
+**PCLK 的物理位置与 FPGA 的时钟脚不相交** —— 模块排布决定的固有冲突。
+
+**⭐ 为什么原来能过**：旧的**错误**映射把 PCLK 放在 U18（正好 CCIO）。
+**错误的接线反而掩盖了这个冲突** —— 改对之后才暴露。
+
+**对策**（Vivado 报错信息里直接给了）：
+
+```tcl
+set_property CLOCK_DEDICATED_ROUTE FALSE [get_nets io_pclk_IBUF]
+```
+
+**可接受的理由**：PCLK 仅 **24 MHz**（周期 41.7 ns），
+输入延时窗口 1.5 ns，非专用路径额外插入延时典型几 ns —— **余量几十倍**。
+⚠ 但**必须靠实现后时序报告确认**（`cam_pclk` 组 WNS 为正）。
+
+> **教训**：**修完一个 bug 要重跑到底**（综合→实现→比特流）。
+> 本条的失败**恰恰出在实现阶段** —— 只跑到综合通过就会漏掉。
+> 另外：**时钟输入必须落 CCIO 脚**是硬性物理要求，
+> 选板卡/模块时要**先把时钟脚与 CCIO 对齐**再定接线。
 
 ---
 

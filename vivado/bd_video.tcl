@@ -265,13 +265,48 @@ set cap [create_bd_cell -type module -reference dvp_capture dvp_capture_0]
 #      VCO = 100 MHz * M / D
 #      XCLK = VCO / O
 #  Zynq-7020 速度等级 -1 的 VCO 范围是 600–1200 MHz。
-#  试 M=12, D=1 → VCO = 1200 MHz（正好在上限）
-#                 O = 1200/24 = 50（整数）✓
 #
-#  ⚠ VCO 取到上限是刻意的：24 MHz 的合成分辨率最高。
-#    如果实测 MMCM 锁定困难（罕见），可试 M=6/D=1/VCO=600/O=25。
+#  ─────────────────────────────────────────────────────────────────────
+#  ⚠⚠ 2026-09-22 实测更正：原来只写 PRIM_IN_FREQ / REQUESTED_OUT_FREQ，
+#      让工具**自动选 M/D/O**，结果选出了 VCO = 1200 MHz（正好顶在上限）。
+#      上板实测 **XCLK 没有输出**（ILA probe6 的 clk_out1 全程恒 1 不翻转，
+#      逻辑分析仪独立测得同一结论）→ 摄像头无主时钟 → SCCB 收不到 ACK
+#      （cfg_error=1）→ 不出图 → VDMA 帧计数恒 1。
+#
+#  **教训**：**别让工具替你选 VCO**。自动选择会贴着你给的上限走，
+#  而 -1 速度等级的上限是"名义值"，实际未必能稳住。
+#  同时也别只信 `CLKOUT1_REQUESTED_OUT_FREQ` —— 它只是个**请求**，
+#  工具可以用不同的 M/D/O 组合满足它，你并不知道 VCO 落在哪。
+#  ─────────────────────────────────────────────────────────────────────
+#  现在**显式指定** M/D/O，把 VCO 钉在 600 MHz（区间正中，远离两端）：
+#      VCO = 100 MHz * M / D = 100 * 6 / 1 = 600 MHz ✓
+#      XCLK = VCO / O      = 600 / 25     = 24 MHz  ✓
+#  代价：VCO 从 1200 降到 600，24 MHz 的**合成分辨率减半**（抖动略增）。
+#  但摄像头对 XCLK 抖动不敏感（它只是主时钟），远好过锁不住。
 # ---------------------------------------------------------------------
 set cw [create_bd_cell -type ip -vlnv xilinx.com:ip:clk_wiz clk_wiz_xclk]
+
+#  ⚠⚠ **必须开 `OVERRIDE_MMCM`，否则 MMCM_* 参数全被静默忽略** ——
+#     2026-09-22 实测，踩了整整一轮才找到。完整现象：
+#
+#     不给 OVERRIDE_MMCM 时，设 M/D/O 会得到：
+#       WARNING: [IP_Flow 19-3374] An attempt to modify the value of
+#                disabled parameter 'MMCM_CLKFBOUT_MULT_F' ... ignored
+#     **只给 WARNING 不给 ERROR**，值直接丢弃，工具照用自己的求解器结果。
+#
+#     而且**光设 PRIMITIVE {MMCM} 不够**（那只是"用哪种原语"），
+#     `USE_FREQ_SYNTH=false` 也不够（那只解开 DIVCLK_DIVIDE，M/O 仍被拒）。
+#     真正的开关是 **`OVERRIDE_MMCM`** —— 它的含义是
+#     "**我要手动指定 MMCM 的 M/D/O，别用你的频率合成器**"。
+#
+#     这个参数在 IP 的常规配置界面里不明显，是打印完整属性表
+#     （`report_property -all $cw`）才找到的。
+#
+#     ⚠ 与本项目其它同类坑完全一致：
+#       AXI DMA 的 `c_sg_length_width`、ILA 的 `C_PROBE{N}_WIDTH` ——
+#       **参数没生效、不报错、只在硬件上表现为怪现象**。
+#       本次是靠下面那段**回读断言**在 1 分钟内抓到的，
+#       否则会一路带到比特流里，白等 40 分钟综合。
 set_property -dict [list \
     CONFIG.PRIM_IN_FREQ          {100.000} \
     CONFIG.CLKOUT1_REQUESTED_OUT_FREQ {24.000} \
@@ -279,7 +314,29 @@ set_property -dict [list \
     CONFIG.USE_RESET             {true} \
     CONFIG.RESET_TYPE            {ACTIVE_LOW} \
     CONFIG.PRIMITIVE             {MMCM} \
+    CONFIG.OVERRIDE_MMCM         {true} \
 ] $cw
+
+# 第二步：OVERRIDE_MMCM 已开，这时 MMCM_* 才真正可写
+set_property -dict [list \
+    CONFIG.MMCM_CLKFBOUT_MULT_F  {6.000} \
+    CONFIG.MMCM_DIVCLK_DIVIDE    {1} \
+    CONFIG.MMCM_CLKOUT0_DIVIDE_F {25.000} \
+] $cw
+
+# ⚠ 设完**必须回读断言** —— 上面那个坑就是"值没生效但不报错"，
+#   不主动查的话会一路带到比特流里，最后表现为"上板后 XCLK 还是不出"，
+#   而那时已经花了 40 分钟综合。本项目同类坑：AXI DMA 的
+#   c_sg_length_width、ILA 的 C_PROBE{N}_WIDTH。
+foreach {p want} {MMCM_CLKFBOUT_MULT_F 6.000 MMCM_DIVCLK_DIVIDE 1 \
+                  MMCM_CLKOUT0_DIVIDE_F 25.000} {
+    set got [get_property -quiet CONFIG.$p $cw]
+    if {$got eq "" || [expr {abs(double($got) - $want)}] > 0.001} {
+        error "MMCM 参数 $p 未生效：期望 $want，实得 '$got'"
+    }
+    puts ">>> MMCM $p = $got ✓"
+}
+puts ">>> MMCM VCO = [expr {100.0 * [get_property CONFIG.MMCM_CLKFBOUT_MULT_F $cw] / [get_property CONFIG.MMCM_DIVCLK_DIVIDE $cw]}] MHz (期望 600)"
 
 # ⚠ 用 MMCM 而不是 PLL：PLL 在 602–1200 的范围内对 VCO 更敏感，
 #    MMCM 对非整数比更宽容。这个比正好整数（O=50），两者都行，
@@ -821,7 +878,186 @@ foreach c [get_bd_cells -quiet] {
 if {[llength $axio_bad] > 0} {
     error "以下 AXI 接口悬空（综合会过但上板必炸）: $axio_bad"
 }
-puts ">>> AXI 接口检查通过：无悬空主口/从口" 
+puts ">>> AXI 接口检查通过：无悬空主口/从口"
+
+# =====================================================================
+#  12.5 【调试】ILA —— 探摄像头前端信号
+#
+#  2026-09-21 加。背景：摄像头通路软件侧完全查不到 ——
+#    · sccb_0 的 cfg_done/cfg_error  无 AXI 接口
+#    · clk_wiz_xclk 的 locked        没引出（clk_out1 直连 io_xclk）
+#    · dvp_capture 的 frame_cnt 等   BD 里悬空
+#    · VDMA 帧计数                   能读，但 10 秒纹丝不动（= 前端没出数据）
+#
+#  没有示波器/逻辑分析仪时，**ILA 是唯一能突破僵局的手段** ——
+#  它装在 FPGA 里、走 JTAG 读出，不花钱、不用接线，
+#  而且**能看到外部仪器看不到的内部信号**（如 frame_cnt）。
+#
+#  ── 采样时钟为什么用 FCLK_CLK0 而不是 io_pclk ──
+#   ⚠ 绝不能用 io_pclk！它是**摄像头产生的**，摄像头不出图时这个时钟
+#     根本不存在 → ILA 自己也停摆 → 什么波形都看不到。
+#     FCLK_CLK0 来自 PS，**永远在**，是唯一可靠的选择。
+#
+#  ── 探针 ──
+#   dvp_capture 的 frame_cnt/line_cnt/stalled 和 vsync_sync/href_sync
+#   都在 **aclk(=FCLK_CLK0) 域**（见 rtl/dvp_capture.v 的 always @(posedge aclk)），
+#   与 ILA 同域，**不需要跨时钟域处理**，采出来的值可完全信。
+#
+#   ⚠ io_pclk / io_href / io_vsync / io_d 是**异步**的（pclk 域），
+#     直连 ILA 有亚稳态风险，看到的值**一个采样周期内不一定代表真实电平**。
+#     但它们能回答一个关键问题：**这根线到底有没有在动**。
+#     判读：波形在跳 = 有信号；一条直线 = 这路没通。
+#
+#  用法：跑完 create_project.tcl 出bit流后，打开 Hardware Manager，
+#        加载 .ltx（与 .bit 同目录、同名），即可看到波形。
+#        **不需要设置触发条件** —— 自由运行就能看 frame_cnt 变不变。
+#
+#  ⚠⚠ **提交前把 use_ila 置 0** —— 开着它会让 BD 多一个 ILA 核：
+#      · BRAM 从 1 块涨到 63 块（52.5%），LUT 21% → 27%
+#      · 每次构建多 1–2 分钟
+#      · 综合/实现报告里的资源数不再代表真实设计
+#     调试时置 1，调完置 0 重新构建。
+#
+#  ⚠ 提交前**务必置回 0**，否则报告里的资源数会虚高（BRAM 52.5%）。
+# =====================================================================
+#  当前状态：**1（开启）** —— 2026-09-22 改 MMCM 参数（VCO 1200→600 MHz）
+#  后重综合，**必须留 ILA 才能验证 XCLK 有没有恢复**。
+#  验证方法：看 probe6（clk_out1）是否开始翻转 —— 见文件头 probe 清单。
+#  验证通过后，再置 0 重综合一次（出正式比特流）。
+# =====================================================================
+set use_ila 1
+if {$use_ila} {
+    # ⚠ 必须用**带版本号的完整 VLNV** —— 2026-09-21 实测：
+    #   `get_ipdefs -quiet xilinx.com:ip:ila`（不带版本）**匹配不到**，
+    #   于是保护分支直接跳过，ILA 静默没加、构建照常成功。
+    #   症状：日志里只有一行 "WARN: 找不到 ILA IP"，很容易被忽略掉。
+    set ILA_VLNV xilinx.com:ip:ila:6.2
+    if {[llength [get_ipdefs -quiet $ILA_VLNV]] == 0} {
+        puts "!!! WARN: 找不到 ILA IP ($ILA_VLNV)，跳过调试探针"
+        puts "    可用的 ILA IP 有: [get_ipdefs -quiet *ila*]"
+    } else {
+        set dbg [create_bd_cell -type ip -vlnv $ILA_VLNV dbg_ila]
+
+        # 探针表：{宽度, 信号源}
+        # ⚠ 顺序即 probe0..probeN，改这里要同步改下面的 probe_names
+        #
+        # ⚠⚠ 只能接**输入方向**的信号！2026-09-21 实测踩过：
+        #   初版把 `io_sda` 也列进来了，但它是**双向**端口
+        #   （`create_bd_port -dir IO`），直接 connect_bd_net 会报
+        #   `[BD 41-701] connect_bd_net requires at least two pins/ports`，
+        #   **而且不告诉你是哪一个**。io_xclk / io_scl 是**输出**，同理不接。
+        #
+        # ⚠⚠⚠ v2（2026-09-21 晚，第一次采集全静止后重做）：
+        #   第一版探针全是"外面看得见的"信号 → 全静止时**分不清**是
+        #   「XCLK 没出」还是「SCCB 没配上」——两者在那些探针上长得一模一样。
+        #   现改为**直插两个嫌疑模块的内部**：
+        #     · clk_wiz_xclk/clk_out1 —— **24 MHz XCLK 本身**。
+        #       比看 `locked` 更硬：locked 是状态位，没锁时恒 0，
+        #       和"信号不存在"分不清；而 clk_out1 在跳就是真有 24 MHz。
+        #     · sccb_0/* —— 配置表跑到第几条、有没有 ACK 错误。
+        #
+        #   ⚠ sccb_0 的信号**全在 100 MHz 域**（sccb_0/clk 就接 FCLK_CLK0），
+        #     与 ILA 同域，采出来完全可信。
+        #   ⚠ clk_wiz_xclk/clk_out1 是 24 MHz，**异步**。100 MHz 采 24 MHz
+        #     会欠采样，但**"在跳"和"死平"一眼可辨** —— 这正是我们要的。
+        #   ⚠ 引脚名必须**逐个核实**，别照着 `.hwh` 抄 —— 2026-09-21 实测：
+        #     `.hwh` 里 sccb_0 列出了 `done_cnt`，但 `rtl/sccb_master.v`
+        #     的端口根本没有它（.hwh 是某个**旧版模块**生成的）。
+        #     照着抄会得到 "no pins matched" + 一个不点名的 [BD 41-701]。
+        #   ⚠ `iobuf_sda_0/io_pad` 是 **inout**，同样不能直接接探针
+        #     （和双向端口 io_sda 是同一个坑）。要看 SDA 就用
+        #     `sccb_0/sda_oe`（驱动使能）和 `sccb_0/sda_o`（输出值）。
+        set probes [list \
+            [list 16 [get_bd_pins dvp_capture_0/frame_cnt]] \
+            [list 16 [get_bd_pins dvp_capture_0/line_cnt]] \
+            [list  1 [get_bd_pins dvp_capture_0/vsync_sync]] \
+            [list  1 [get_bd_pins dvp_capture_0/href_sync]] \
+            [list  1 [get_bd_ports io_pclk]] \
+            [list  8 [get_bd_ports io_d]] \
+            [list  1 [get_bd_pins clk_wiz_xclk/clk_out1]] \
+            [list  8 [get_bd_pins sccb_0/tbl_addr]] \
+            [list  8 [get_bd_pins sccb_0/done_cnt]] \
+            [list  1 [get_bd_pins sccb_0/cfg_done]] \
+            [list  1 [get_bd_pins sccb_0/cfg_error]] \
+            [list  1 [get_bd_pins sccb_0/scl]] \
+            [list  1 [get_bd_pins sccb_0/sda_oe]] \
+            [list  1 [get_bd_pins sccb_0/sda_o]] \
+        ]
+
+        set n 0
+        set cfg [list CONFIG.C_NUM_OF_PROBES [llength $probes] \
+                      CONFIG.C_DATA_DEPTH {8192} \
+                      CONFIG.C_INPUT_PIPE_STAGES {1}]
+        foreach pr $probes {
+            lappend cfg CONFIG.C_PROBE${n}_WIDTH [lindex $pr 0]
+            incr n
+        }
+        # ⚠ 设完必须**回读验证** —— 2026-09-21 实测：这里静默失效过一次，
+        #   症状是综合时报一堆 CRITICAL WARNING 「Width mismatch」：
+        #       探针 probe0 宽 1 却接了 16 位的 frame_cnt
+        #   而 set_property 本身**不报任何错**，只是没生效。
+        #
+        # ⚠⚠ Tcl 赋值必须写 `set 变量名 值` —— 少了第一个 set 会变成
+        #   「调用一个叫该名字的命令」，报 invalid command name。
+        set ila_ok 1
+        if {[catch {set_property -dict $cfg $dbg} err]} {
+            puts "!!! WARN: 设置 ILA 参数失败: $err"
+            set ila_ok 0
+        } else {
+            set np [get_property CONFIG.C_NUM_OF_PROBES $dbg]
+            puts ">>> ILA 参数回读：C_NUM_OF_PROBES=$np（期望 [llength $probes]）"
+            set n 0
+            foreach pr $probes {
+                set w [get_property CONFIG.C_PROBE${n}_WIDTH $dbg]
+                set want [lindex $pr 0]
+                set tag [expr {$w == $want ? "OK" : "!!! 不符"}]
+                puts "      probe$n 宽 = $w（期望 $want）$tag"
+                if {$w != $want} { set ila_ok 0 }
+                incr n
+            }
+            if {!$ila_ok} {
+                error "ILA 探针宽度设置未生效，继续综合会得到错位的波形"
+            }
+        }
+
+        # 采样时钟
+        # ⚠ ILA **没有 resetn 引脚**（端口只有 clk / clk_nobuf / probe* / trig_*）。
+        #   2026-09-21 实测：给 dbg_ila/resetn 连线会报
+        #     WARNING: [BD 5-235] No pins matched 'get_bd_pins dbg_ila/resetn'
+        #     ERROR:   [BD 41-701] connect_bd_net requires at least two pins/ports
+        #   而报错**不点名是哪一个引脚**，得靠这条 WARNING 反推。
+        if {[llength [get_bd_pins -quiet dbg_ila/clk]] == 0} {
+            puts "!!! WARN: dbg_ila/clk 不存在，可用引脚: [get_bd_pins dbg_ila/*]"
+        } else {
+            connect_bd_net [get_bd_pins dbg_ila/clk] [get_bd_pins dvp_capture_0/aclk]
+        }
+
+        # 逐个接探针
+        #  ⚠ 每个源都先查存不存在再连 —— 直接 connect_bd_net 遇到空对象会报
+        #    [BD 41-701] "requires at least two pins/ports"，
+        #    **但不告诉你是哪一个**，得回去一个个猜。先查再连能直接点名。
+        set n 0
+        set probe_names [list frame_cnt line_cnt vsync_sync href_sync io_pclk \
+                              io_d xclk_out sccb_tbl_addr sccb_done_cnt \
+                              sccb_cfg_done sccb_cfg_error sccb_scl \
+                              sccb_sda_oe sccb_sda_o]
+        foreach pr $probes {
+            set src [lindex $pr 1]
+            set nm  [lindex $probe_names $n]
+            if {[llength $src] == 0} {
+                puts "!!! WARN: probe$n ($nm) 的信号不存在 —— 空对象"
+            } elseif {[llength [get_bd_pins -quiet dbg_ila/probe$n]] == 0} {
+                puts "!!! WARN: probe$n ($nm) 的 ILA 引脚不存在"
+            } else {
+                connect_bd_net $src [get_bd_pins dbg_ila/probe$n]
+            }
+            incr n
+        }
+        puts ">>> 已加 ILA 调试探针（[llength $probes] 个 probe，采样时钟 FCLK_CLK0）"
+        puts "    用途：摄像头不出图时，用它看 frame_cnt / io_pclk / io_href 有没有在动"
+        puts "    ⚠ 验证完可把本段 use_ila 置 0 关掉，免得占资源"
+    }
+}
 
 # =====================================================================
 #  13. 生成产物

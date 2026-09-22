@@ -145,61 +145,106 @@ set_clock_groups -asynchronous \
 #    其余 io_d[*] / io_pclk / io_href / io_vsync → dvp_capture
 #
 #  ─────────────────────────────────────────────────────────────────
-#  ⚠⚠ 引脚编号：原理图是"镜像编号"，不是 Pmod 规范编号
+#  ⚠⚠ 引脚编号：**标准 Pmod 编号**（2026-09-22 按模块丝印实测更正）
 #  ─────────────────────────────────────────────────────────────────
-#  原理图 J2/J3 的编号画法是：左列 12→7 自上而下，右列 1→6 自上而下。
-#  这**不是**标准 Pmod 的编号方式，两种解读的物理对应完全不同：
+#  **本文件原先按"镜像编号"推导，那个推导是错的** —— 它让 14 个信号
+#  全部接错，是"摄像头不出图"排查了一个月的真正根因。详见文末更正记录。
 #
-#      直编号：物理第 5 列 = GND + DVP_HREF   ← HREF 会被短到 GND
-#      镜像  ：物理第 5 列 = GND + GND         ← 电源脚对齐 ✓
-#
-#  **本文件按"镜像"编号**，理由是一致性：只有镜像解读能让
-#  两个连接器的 GND/GND、3V3/3V3 都落在**同一物理列**上，
-#  与 PYNQ-Z2 Pmod 口的电源脚位置吻合。
-#  模块作者既然做了 Pmod 接口，不会把电源脚放错位。
-#
-#  ⚠ 但这是**一致性论证，不是实测**。
-#    上板前**必须用万用表复核**，步骤见本文件末尾「上电前验证」。
-#    插错方向的后果：3V3 与 GND 反接（烧板）或 HREF 被短到 GND。
+#  实测依据：**直接读模块丝印**（PMOD A / PMOD B 两个连接器，
+#  每个 12 针都有信号名丝印）。丝印给出的电源脚是：
+#        5=GND  6=3V3  11=GND  12=3V3
+#  **这正是 Pmod 规范的标准位置**（第 5/6 列是电源），
+#  而"镜像"解读会把电源推到 5/6/7/8 —— 两者不相容。
+#  既然丝印符合标准规范，模块用的就是**标准编号**。
 #
 #  ─────────────────────────────────────────────────────────────────
-#  信号 → 物理位 → PYNQ 端口 对照（含中间推导）
+#  信号 → 物理位 → PYNQ 端口 对照（2026-09-22 实测版）
 #  ─────────────────────────────────────────────────────────────────
-#  原理图 J2（右列自上而下 1..6，左列自上而下 12..7）：
-#       pin 1  XMCLK        pin 7  (3V3)    → 物理 列1上 / 列1下
-#       pin 2  DVP_VSYNC    pin 8  (GND)
-#       pin 3  I2C_SDA      pin 9  I2C_SCL
-#       pin 4  NC           pin 10 DVP_HREF
-#       pin 5  (GND)        pin 11 DVP_PCLK
-#       pin 6  (3V3)        pin 12 NC
+#  模块丝印（PMOD A，两排各 6 针）：
+#       1 NC      2 PCLK    3 HREF   4 SCL    5 GND   6 3V3
+#       7 NC      8 XCLK    9 VSYNC 10 SDA   11 GND  12 3V3
 #
-#  Pmod 规范：奇数脚 = 上行，偶数脚 = 下行，每列一对
-#       ja[0]=列1上  ja[1]=列2上  ja[2]=列3上  ja[3]=列4上
-#       ja[4]=列1下  ja[5]=列2下  ja[6]=列3下  ja[7]=列4下
+#  模块丝印（PMOD B）：
+#       1 D7      2 D5      3 D3     4 D1     5 GND   6 3V3
+#       7 D6      8 D4      9 D2    10 D0    11 GND  12 3V3
 #
+#  Pmod 规范编号：第 N 列 上行 = ja[2N-2]、下行 = ja[2N-1]
+#       列1→ja[0]/ja[4]  列2→ja[1]/ja[5]  列3→ja[2]/ja[6]  列4→ja[3]/ja[7]
+#       列5→GND/GND      列6→3V3/3V3
+#
+#  由此得（⚠ **Y18 / U18 未被使用**，正对应模块的 pin1 / pin7 = NC）：
+#       XCLK  → pin 8  → ja[5] → U19
+#       PCLK  → pin 2  → ja[1] → Y19
+#       HREF  → pin 3  → ja[2] → Y16
+#       VSYNC → pin 9  → ja[6] → W18
+#       SCL   → pin 4  → ja[3] → Y17
+#       SDA   → pin 10 → ja[7] → W19
+#
+#  交叉验证：新映射留空的恰好是 Y18/U18 —— 与模块 NC 脚一一对应 ✓
+#  （旧的错误映射把 XCLK 送到 Y18 = 模块 pin1 = NC，摄像头因此
+#    永远收不到主时钟；把 io_pclk 从 U18 读 = 模块 pin7 = NC，
+#    因此恒 1。两个"恒 1"现象由此得到解释。）
 #  ─────────────────────────────────────────────────────────────────
 
 # XCLK：⚠ 这是 **output**（FPGA 产生 24MHz 给摄像头）
-set_property -dict { PACKAGE_PIN Y18 IOSTANDARD LVCMOS33 } [get_ports io_xclk]
+#   ⚠ XCLK 输出**不需要**时钟专用脚 —— 数据流是 FPGA → 模块，
+#     不经过 BUFG，所以可以放在普通 IO（这里就是 ja[5]=U19）。
+set_property -dict { PACKAGE_PIN U19 IOSTANDARD LVCMOS33 } [get_ports io_xclk]
 
 # VSYNC / SDA / HREF / SCL 都是双向或输入
-set_property -dict { PACKAGE_PIN Y19 IOSTANDARD LVCMOS33 } [get_ports io_vsync]
-set_property -dict { PACKAGE_PIN Y16 IOSTANDARD LVCMOS33 } [get_ports io_sda]
-set_property -dict { PACKAGE_PIN U19 IOSTANDARD LVCMOS33 } [get_ports io_href]
-set_property -dict { PACKAGE_PIN W18 IOSTANDARD LVCMOS33 } [get_ports io_scl]
+set_property -dict { PACKAGE_PIN W18 IOSTANDARD LVCMOS33 } [get_ports io_vsync]
+set_property -dict { PACKAGE_PIN W19 IOSTANDARD LVCMOS33 } [get_ports io_sda]
+set_property -dict { PACKAGE_PIN Y16 IOSTANDARD LVCMOS33 } [get_ports io_href]
+set_property -dict { PACKAGE_PIN Y17 IOSTANDARD LVCMOS33 } [get_ports io_scl]
 
 # PCLK：⚠ 在 Pmod A 上（不是 Pmod B）
-set_property -dict { PACKAGE_PIN U18 IOSTANDARD LVCMOS33 } [get_ports io_pclk]
+#
+#  ⚠⚠ 必须加 CLOCK_DEDICATED_ROUTE FALSE（2026-09-22 实测，见下） ——
+#     这是**引脚映射修正后暴露出的新问题**，根因是模块的引脚排布：
+#
+#       模块 PCLK 在 pin 2 → ja[1] → **Y19**（普通 IO）
+#       模块 XCLK 在 pin 8 → ja[5] → U19（CCIO）← 但 XCLK 是输出
+#       模块 pin 7 = NC     → ja[4] → U18（CCIO）← 空脚
+#
+#     **Pmod A 上唯一两个 CCIO（时钟能力）脚是 U18/U19**，而它们
+#     在模块上分别对应 **NC 和 XCLK** —— 都不是 PCLK。
+#     即：**PCLK 的物理位置（pin2）与 FPGA 的时钟专用脚不相交**，
+#     这是模块引脚排布决定的**固有冲突**，无解，只能 override。
+#
+#     不加会直接**布线失败**（不是警告）：
+#        ERROR: [Place 30-574] Poor placement for routing between
+#               an IO pin and BUFG
+#        Clock Rule: rule_gclkio_bufg  Status: FAILED
+#        Rule Description: An IOB driving a BUFG must use a CCIO
+#               in the same half side of chip as the BUFG
+#
+#  ── 风险评估（为什么可以接受）──
+#    非专用路径会引入额外的**时钟插入延时**，导致 PCLK 与数据
+#    的采样关系发生偏移。但：
+#      · PCLK 仅 **24 MHz**，周期 **41.7 ns**
+#      · 输入延时约束窗口只有 **1.5 ns**（见下方 set_input_delay）
+#      · 几十倍余量，典型插入延时（几 ns）不足以吃掉它
+#
+#  ⚠ **必须靠实现后的时序报告验证**，不能想当然。判据：
+#      · clk_fpga_0 / cam_pclk 组 WNS 是否为正
+#      · 若为负 → 下调采集方式或改用 oversampling（见 rtl/README.md）
+#
+#  ⚠ 这是本项目**唯一一处** "明知不推荐但仍必须用"的 override ——
+#    理由是硬件引脚排布的物理限制，不是图省事。
+set_property CLOCK_DEDICATED_ROUTE FALSE [get_nets io_pclk_IBUF]
 
-# ---- J3 → Pmod B（数据线，注意是交错的）----
-set_property -dict { PACKAGE_PIN W14 IOSTANDARD LVCMOS33 } [get_ports { io_d[6] }]
-set_property -dict { PACKAGE_PIN Y14 IOSTANDARD LVCMOS33 } [get_ports { io_d[4] }]
-set_property -dict { PACKAGE_PIN T11 IOSTANDARD LVCMOS33 } [get_ports { io_d[2] }]
-set_property -dict { PACKAGE_PIN T10 IOSTANDARD LVCMOS33 } [get_ports { io_d[0] }]
-set_property -dict { PACKAGE_PIN V16 IOSTANDARD LVCMOS33 } [get_ports { io_d[7] }]
-set_property -dict { PACKAGE_PIN W16 IOSTANDARD LVCMOS33 } [get_ports { io_d[5] }]
-set_property -dict { PACKAGE_PIN V12 IOSTANDARD LVCMOS33 } [get_ports { io_d[3] }]
-set_property -dict { PACKAGE_PIN W13 IOSTANDARD LVCMOS33 } [get_ports { io_d[1] }]
+
+set_property -dict { PACKAGE_PIN Y19 IOSTANDARD LVCMOS33 } [get_ports io_pclk]
+
+# ---- J3 → Pmod B（数据线）----
+set_property -dict { PACKAGE_PIN V16 IOSTANDARD LVCMOS33 } [get_ports { io_d[6] }]
+set_property -dict { PACKAGE_PIN W16 IOSTANDARD LVCMOS33 } [get_ports { io_d[4] }]
+set_property -dict { PACKAGE_PIN V12 IOSTANDARD LVCMOS33 } [get_ports { io_d[2] }]
+set_property -dict { PACKAGE_PIN W13 IOSTANDARD LVCMOS33 } [get_ports { io_d[0] }]
+set_property -dict { PACKAGE_PIN W14 IOSTANDARD LVCMOS33 } [get_ports { io_d[7] }]
+set_property -dict { PACKAGE_PIN Y14 IOSTANDARD LVCMOS33 } [get_ports { io_d[5] }]
+set_property -dict { PACKAGE_PIN T11 IOSTANDARD LVCMOS33 } [get_ports { io_d[3] }]
+set_property -dict { PACKAGE_PIN T10 IOSTANDARD LVCMOS33 } [get_ports { io_d[1] }]
 
 # ---- 输入延时：DVP 是源同步接口 ----
 # 数据由摄像头在 PCLK 边沿输出，用 set_input_delay 而不是普通建立/保持。
@@ -405,24 +450,27 @@ set_false_path -from [get_cells -quiet -hier \
 # =====================================================================
 #  上电前验证（⚠ 必做 —— 插错方向会烧板）
 #
-#  本文件按"镜像编号"推导引脚（见第三层说明），但那是**一致性论证，
-#  不是实测**。插上去之前必须用万用表确认。
+#  ✅ **2026-09-22 已完成实测** —— 方法比万用表更直接：
+#     **读模块丝印**（见第三层说明）。丝印电源脚 = 标准 Pmod 位置，
+#     映射已按此更正，不再是"镜像"推导。
+#
+#  ⚠ 下面这段是**更正前的旧步骤**，保留作为方法参考（通断检测本身没错）。
+#     但**不必再按"镜像假设"去验证** —— 那个假设已被推翻。
 #
 #  ─────────────────────────────────────────────────────────────────
-#  步骤（三分钟，通断档）
+#  通用的 Pmod 通断复核法（换模块时仍适用）
 #  ─────────────────────────────────────────────────────────────────
 #
-#  ① 量模块：找出 J2 上哪两个物理针是 3V3 与 GND
-#     - 3V3：点模块上某个电解电容的正极或 LDO 输出脚，扫 J2 的针
-#     - GND：点任意螺丝孔或 GND 铺铜，扫 J2 的针
+#  ① 量模块：找出连接器上哪两个物理针是 3V3 与 GND
+#     - 3V3：点模块上某个电解电容的正极或 LDO 输出脚，扫各针
+#     - GND：点任意螺丝孔或 GND 铺铜，扫各针
 #
-#  ② 量 PYNQ-Z2：找出 Pmod A 上哪两个物理针是 3V3 与 GND
-#     - GND 可点 Micro-USB 外壳
-#     - 3V3 可点板上其他 3V3 点（如 Arduino 座的 3V3）
+#  ② 量 PYNQ-Z2：Pmod 上哪两个物理针是 3V3 与 GND
+#     - GND 可点 Micro-USB 外壳；3V3 可点板上其他 3V3 点
 #
 #  ③ 对比：两边的 3V3 与 GND 必须落在**相同的物理列**
 #     ✓ 对上 → 可以插
-#     ✗ 对不上 → **不要插**，本文件的镜像假设不成立，需要重做映射
+#     ✗ 对不上 → **不要插**，映射有误，需重做
 #
 #  ④ 最后：量模块 3V3 与 GND 之间**不短路**
 #     （应为几 kΩ 以上，不是 0 Ω —— 0 Ω 说明模块本身有问题）
@@ -433,10 +481,14 @@ set_false_path -from [get_cells -quiet -hier \
 #
 #  1. io_xclk 应有 24 MHz 输出 —— 示波器或 ILA 探一下
 #  2. io_scl 在 sccb_master 跑起来后应有 100 kHz 方波
-#  3. io_pclk 在摄像头配置成功后应有 24 MHz（**配置前不会有**）
-#  4. io_href / io_vsync 应有周期性脉冲
+#  3. io_pclk 在摄像头上电后就应有输出（**不受 SCCB 配置影响** ——
+#     OV5640 只要有时钟和供电就会吐 PCLK，所以它比 cfg_error 更能
+#     定位"模块到底活没活"）
+#  4. io_href / io_vsync 应有周期性脉冲（这几条要配置成功后才会有）
 #
-#  ⚠ 第 3 条是最重要的判据：
-#    如果 io_scl 有波形但 io_pclk 一直没有，说明 **SCCB 没配上** ——
-#    去查 sccb_master 的 cfg_error，以及 OV5640 的寄存器表内容。
+#  ⚠ **第 3 条是最好的判据**（2026-09-22 修正）：
+#    · io_pclk 有波形 → 模块活着（有电、有时钟）→ 问题在 SDA/SCL
+#    · io_pclk 无波形 → 模块没工作 → 查 XCLK 有没有真正送到、
+#      以及模块供电
+#    它把"接线错"和"没供电/模块坏"分开，而这正是之前卡住的地方。
 # =====================================================================

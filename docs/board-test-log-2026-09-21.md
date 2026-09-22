@@ -213,7 +213,105 @@ dma_out   C_SG_LENGTH_WIDTH = 24
 
 ---
 
-## 五、假设与检验（**含已排除项与我自己犯的错**）
+## 五、摄像头通路（③ 通过后继续）
+
+### 5.0 结论（**未解决，但已定位到 SCCB**）
+
+**摄像头不出图。ILA 抓到硬证据：`sccb_0/cfg_error = 1`** ——
+SCCB 发出的配置事务**没收到 OV5640 的 ACK**，摄像头从未被初始化。
+
+因果链：
+
+```
+cfg_error=1  →  摄像头没配好  →  不出图  →  无 PCLK  →  VDMA 收不到帧
+                                                              （帧计数恒 0、缓冲全 0）
+```
+
+**尚未区分**（下一步要定的）：
+
+| 可能 | 说明 |
+|---|---|
+| **A. XCLK 没出** | 摄像头无主时钟 → 不响应 SCCB。项目注释自己担心过：MMCM 的 VCO=1200 MHz 取到 **-1 速度等级上限**，备选参数 `M=6/D=1/VCO=600/O=25` |
+| **B. XCLK 正常，SDA/SCL 接线错** | 引脚映射是**"镜像"推理的，从没实测过**（手册 §2.2 的万用表复核一直没做） |
+
+**下一步**：加两个不受欠采样影响的 ILA 探针 ——
+`clk_wiz_xclk/locked`（静态信号，锁定=1）+ `sccb_0/sda_i`（从机应答）。
+`locked` 能一刀切开 A 和 B。
+
+### 5.1 软件侧为什么查不到（**四个观测点全部没接出来**）
+
+这是本次排查最大的结构性障碍：
+
+| 想看什么 | 在哪 | 软件能读吗 |
+|---|---|---|
+| `sccb_0` 的 `cfg_done`/`cfg_error` | RTL 输出 | ❌ **无 AXI 接口**（纯 module_ref） |
+| `clk_wiz_xclk` 的 `locked` | MMCM 输出 | ❌ **没引出**（`clk_out1` 直连 `io_xclk`） |
+| `dvp_capture` 的 `frame_cnt`/`line_cnt` | RTL 输出 | ❌ **BD 里悬空**（作者留了观测点，集成时没接） |
+| VDMA 帧计数 | AXI-Lite | ✅ 能读 —— **读了，恒 0** |
+
+> ⚠ `dvp_capture.v` 的注释写着「状态输出（**给 PS 读**，用于确认"摄像头
+> 到底有没有在出数据"）」—— **设计者本来就为此留了接口，BD 集成时漏接了**。
+
+### 5.2 ILA 是唯一出路（**无示波器/逻辑分析仪时**）
+
+本机**没有示波器，也没有逻辑分析仪**。突破口是 **ILA**：
+
+| | 外部仪器 | **ILA** |
+|---|---|---|
+| 花钱 | ¥40–80 | **0** |
+| 接线 | 要飞线 | **不用，走 JTAG**（PYNQ-Z2 那根 Micro-USB 兼作 JTAG） |
+| 看内部信号 | ❌ 只能看引脚 | ✅ **`sccb_0`/`clk_wiz` 内部都能看** |
+
+**这是本次实测最重要的方法论结论**：
+**没有仪器不等于不能调试 —— ILA 免费且更强。**
+
+### 5.3 ILA 集成踩的坑（**都值得记**）
+
+| # | 现象 | 根因 |
+|---|---|---|
+| 1 | `WARN: 找不到 ILA IP` → 静默跳过 | `get_ipdefs` 必须用**带版本号的 VLNV**（`xilinx.com:ip:ila:6.2`） |
+| 2 | `[BD 41-701] connect_bd_net requires at least two pins` | ① 把**双向端口**（`io_sda`、`iobuf_*/io_pad`）和输出端口（`io_xclk`/`io_scl`）接探针 —— **探针是输入方向** |
+| 3 | 同上 | ② **ILA 没有 `resetn` 引脚**（只有 `clk`/`clk_nobuf`/`probe*`/`trig_*`） |
+| 4 | `invalid command name "set_prop_ok"` | **Tcl 赋值必须写 `set 变量名 值`**，漏了第一个 `set` |
+| 5 | 探针宽度全错（`probe0(1)` 接 16 位信号） | `C_PROBE{N}_WIDTH` 设了但**静默没生效** |
+
+> **坑 2/3 的共同点**：`[BD 41-701]` **不告诉你是哪个引脚**，
+> 只能靠上一条 `WARNING [BD 5-235] No pins matched 'xxx'` 反推。
+> → 对策：**接线前先 `llength` 检查引脚是否存在**，逐条报告。
+>
+> **坑 5 的对策（已写进脚本）**：设完参数**回读断言**，不符就 `error`。
+> 这和 AXI DMA 的 `c_sg_length_width` 是同一类问题 ——
+> **配置没生效、不报错、只在硬件上表现为怪现象**。
+
+### 5.4 摄像头通路的驱动尝试
+
+| 做法 | 结果 |
+|---|---|
+| `ol.vdma` | ❌ `AttributeError: 'AxiVDMA' object has no attribute 's2mm_introut'` |
+| **清理 `ip_dict` 后构造 `DefaultIP`** | ✅ **可用**（`host/vdma_bypass_test.py` 实测） |
+| 裸 `MMIO(phys_addr, range)` | ✅ 同样可用 |
+
+**根因**：PYNQ 的 `AxiVDMA` 专用驱动**硬要求中断**，而 **BD 里所有中断都悬空**
+（没接 PS 的 `IRQ_F2P` —— 项目全程轮询，那是有意设计，不是 bug）。
+
+→ 对策见 `host/camera_probe.py`：**pop 掉 `ip_dict` 里的
+`interrupts`/`driver` 两个字段再构造 `DefaultIP`**（它们是 PYNQ 选专用驱动的开关）。
+
+**VDMA 寄存器偏移**（从 `.hwh` 提取，**不是凭记忆** —— `S2MM_VSIZE` 在 `0xA0`
+而不是 `0x50`，`0x50` 是 MM2S 的同名寄存器）：
+
+| 寄存器 | 偏移 |
+|---|---|
+| `S2MM_VDMACR` | `0x30`（复位值 `0x10042`，`Circular_Park` 默认已置位） |
+| `S2MM_VDMASR` | `0x34`（`Halted`=bit0、`*Err`=bit4-8、**帧计数=bit16-23**） |
+| `S2MM_VSIZE` / `HSIZE` / `FRMDLY_STRIDE` | `0xA0` / `0xA4` / `0xA8` |
+| `S2MM_SA1..3` | `0xAC` / `0xB0` / `0xB4` |
+
+> ⚠ **`camera_probe.py` 第一版有假阳性**：把"帧计数非零"当"收到帧"，
+> 而那个 `1` 可能是复位前的陈旧值。**改成"本次运行中是否增长"**才对。
+> （2026-09-21 实测：基线 1 → 结束 1，变化 **0** 次，缓冲区全零。）
+
+---
 
 > ⚠ 本节记录**诊断脚本自身的 bug**，因为它们一度污染了结论。
 > 记录在此以免后续重复踩。

@@ -4,25 +4,25 @@
 > 改造中 Sobel 相关内容已从主线移除，那个参照工程完整保留在 `legacy/sobel/`。
 > 详见下文「原 Sobel 工程在哪」。
 >
-> ## 当前进度（2026-09-22；**已上板**）
+> ## 当前进度（2026-09-22；**已上板，②③ 通过**）
 >
 > | 部分 | 内容 | 状态 |
 > |---|---|---|
-> | **HLS 处理链** | `src_hls/gesture_preproc.cpp` | ✅ csim + csynth + cosim 全过（cosim 6/6 事务），IP 已导出 |
+> | **HLS 处理链** | `src_hls/gesture_preproc.cpp` | ✅ csim + csynth + cosim 全过，IP 已导出 |
 > | **RTL 外设** | `rtl/`：DVP 采集 + SCCB + 异步 FIFO + IOBUF + 寄存器表 | ✅ 3/3 TB PASSED（主机仿真） |
-> | **BD 视频流水线** | `vivado/bd_video.tcl`（含预处理链 + Clocking Wizard + SCCB） | ✅ validate + 综合 + 实现 |
-> | **约束** | `vivado/constraints/video_io.xdc`（摄像头引脚已启用） | ✅ 综合验证生效 |
+> | **BD 视频流水线** | `vivado/bd_video.tcl` | ✅ validate + 综合 + 实现 |
+> | **约束** | `vivado/constraints/video_io.xdc` | ✅ **2026-09-22 按模块丝印重写**（原"镜像"推导全错） |
 > | **PS 侧驱动** | `sw/preproc_driver.c` | ✅ 主机自检 24/24 |
-> | **时序 / 比特流 / XSA** | 实现后实测 | ✅ **WNS +0.265 ns**，比特流 4.0 MB，XSA 750 KB |
-> | **板级实测 ②③** | DDR 自检 + 只跑预处理链（**不需摄像头**） | ✅✅ **11/11 全过**（2026-09-21，单帧 0.005 s） |
-> | **板级实测 ④~⑧** | 摄像头通路（采集 → 显示） | ❌ **卡在 SCCB**：`cfg_error=1`，尚未区分 XCLK / 接线（见下） |
-> | **OV5640 寄存器表** | `rtl/ov5640_regs.v` | ✅ 真表 250 条已进比特流并加载，⚠ **但配置事务未收到 ACK**，出图未验证 |
-> | HDMI 输出 | TMDS 编码器 | ⚠️ 未做（端口暂用 DRC 豁免，**上板不要接 HDMI 线**） |
+> | **时序 / 比特流 / XSA** | 实现后实测 | ✅ **WNS +0.517 ns**（含 CCIO override） |
+> | **板级实测 ②③** | DDR 自检 + 只跑预处理链 | ✅✅ **11/11 全过**（2026-09-21） |
+> | **板级实测 ④~⑧** | 摄像头通路 | ❌ **仍未通**：帧计数 0，见 `docs/board-test-log-2026-09-22.md` |
+> | HDMI 输出 | TMDS 编码器 | ⚠️ 未做（**上板不要接 HDMI 线**） |
 >
-> ⚠⚠ **上板前必读 `docs/board-test-log-2026-09-21.md`** ——
-> 首次上板的完整排查记录，含**一个"全流程静默通过、上板才炸"的 DMA bug**：
-> `C_SG_LENGTH_WIDTH` 默认 14 位 → 单次传输上限 16383 B，而帧要传 614400 B。
-> **修复前的比特流（含 `v0.2`/`v0.3` 两个 tag）上板必坏，必须用 `a4eabe6` 及之后的。**
+> ⚠⚠ **上板前必读**（两份实测记录，按时间倒序）：
+> - **`docs/board-test-log-2026-09-22.md`**（最新）——
+>   MMCM 参数静默失效、引脚映射全错、CCIO 冲突、蓝屏
+> - `docs/board-test-log-2026-09-21.md` ——
+>   **DMA `C_SG_LENGTH_WIDTH` 默认 14 位**（修复前的比特流上板必坏）
 > 
 > ⚠ **WNS 逐次波动较大**：同一设计三次实现的实测为 +0.873 / +1.177 / **+0.265** ns。
 > 布线是随机过程，每次结果不同。
