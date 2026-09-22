@@ -11,6 +11,8 @@
 
 ```
    ┌─────────────────────────────────────────────────────┐
+   │  capture_frame.py     图片/摄像头 → RGB565 .bin      │
+   │      ↓ 产出 .bin（PL 的输入）                         │
    │  gesture_golden.py     Python 参考实现（第三方对拍） │
    │      ↓ 产出 .bin                                     │
    │  dump_frame.py         帧比对/出图（两侧共用）        │
@@ -19,9 +21,39 @@
    └─────────────────────────────────────────────────────┘
 ```
 
+> ⭐ **`capture_frame.py` 是方案 A（不用摄像头）的关键一环** ——
+> 它把「图像来源」和「图像处理」解耦：PL 侧只认「DDR 里一块
+> 640×480 RGB565」，不关心数据来自摄像头还是文件。
+> 详见 `docs/board-test-log-2026-09-22.md` §十。
+
+### `capture_frame.py` —— 输入源
+
+```bash
+# 图片（不需要任何硬件）
+python capture_frame.py --image photo.jpg --out frame.bin --png preview.png
+
+# USB 摄像头（PYNQ 的 USB Host 口，⚠ 可能需要有源 hub）
+python capture_frame.py --camera 0 --out frame.bin
+```
+
+**两个约定**（与 PL 侧必须对齐）：
+
+| 项 | 值 | 搞错的症状 |
+|---|---|---|
+| **位序** | `R[15:11] G[10:5] B[4:0]` | 颜色怪但结构对 |
+| **字节序** | 小端 | 左右像素互换 |
+
+**缩放策略是 cover**（按比例填满后居中裁）—— **不是拉伸**。
+理由：拉伸会让手势变形，直接破坏后续 ROI 与形态学效果。
+
+> ⚠ **`cv2.imread` 读不了中文路径**（Windows 上按系统 ANSI 编码开文件，
+> 报 `can't open/read file`，**错误信息完全不提编码**）。
+> 脚本里改用 `np.fromfile` + `cv2.imdecode` 绕开。
+
 | 文件 | 在哪跑 | 作用 |
 |---|---|---|
 | `gesture_golden.py` | **PC** | 预处理链的 Python 参考实现 |
+| `capture_frame.py` | **PC** | **图片 / USB 摄像头 → RGB565 `.bin`**（喂给 PL 的输入源） |
 | `dump_frame.py` | **PC + 板** | 帧数据的转储、比对、出图 |
 | `gesture_overlay.py` | **板（PYNQ）** | 加载 overlay、驱动整条流水线 |
 | `pynq_serial.py` | **PC** | 串口控制台，从启动日志里抠板卡 IP |
