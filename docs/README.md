@@ -6,8 +6,8 @@
 |---|---|---|
 | **`architecture-contract.md`** | **分工边界 + 数据契约 + 决策记录** | 所有人（**先读这个**） |
 | **`hardware-checklist.md`** | 采购清单 + 引脚映射 + 上电前验证 | 采购 / 接线的人 |
-| **`board-bringup-guide.md`** | **上板实测流程 + 分级验证 + 硬阻塞清单** | **拿到板子的人（上电前必读）** |
-| **`board-test-log-2026-09-21.md`** | **2026-09-21 首次上板实测记录**：环境踩坑、已确认项、故障现象与假设 | 继续排查的人（**接着上次查时先读这个**） |
+| **`board-bringup-guide.md`** | **上板实测流程 + 分级验证 + 硬阻塞清单** | 拿到板子的人（上电前必读） |
+| **`board-test-log-2026-09-21.md`** | **2026-09-21 首次上板实测记录**：②③ 已通过（11/11）、DMA 根因与修复、摄像头定位到 SCCB、环境踩坑 | 继续排查的人（**接着上次查时先读这个**） |
 | `gui-reproduction-guide.md` | 全程鼠标操作的复现流程 | 要用 GUI 的人 |
 
 > 原 Sobel 工程的 GUI 复现指南（已实机验证过的那份）在
@@ -38,7 +38,7 @@
 
 ---
 
-## 三个文件分别在回答什么问题
+## 四个文件分别在回答什么问题
 
 ### `architecture-contract.md` —— 为什么这么做
 
@@ -69,6 +69,18 @@
 **不含** HLS 部分 —— 那一块去看 `legacy/sobel/docs/GUI复现指南.md`
 （组件式 vs 直接开 HLS 工程、csim 的"假成功"陷阱等，都是通用的）。
 
+### `board-test-log-2026-09-21.md` —— **实际做出来是什么样**
+
+与 `board-bringup-guide.md` 的分工：那份是「**该怎么做**」，
+这份是「**实际做出来是什么样**」，按时间顺序保留**完整排查过程（含走错的弯路）**。
+
+- **②③ 已通过**：DDR 自检 + 只跑预处理链，`11/11` 全过，单帧 0.005 s
+- **DMA 根因与修复**：`C_SG_LENGTH_WIDTH` 默认 14 位 → 只传前 16 KB
+  （判据：**读回值 = 写入值 mod 16384**）
+- **摄像头未解**：ILA 抓到 `sccb_0/cfg_error = 1`，**未区分 XCLK 没出 / 接线错**
+- **环境踩坑**：SD 卡未烧、网卡配错、`sudo` 清空环境（唯一正确调用方式）
+- **诊断工具自身的 7 个 bug** —— 记录了"大量时间消耗在工具缺陷上，而不是问题本身"
+
 ---
 
 ## 当前项目的完整入口
@@ -78,6 +90,7 @@ README.md                          ← 总入口，含进度表与一键回归�
 ├── docs/architecture-contract.md          ← 先读这个（做什么、为什么）
 ├── docs/hardware-checklist.md            ← 买什么、怎么接
 ├── docs/gui-reproduction-guide.md ← 怎么点出来
+├── docs/board-test-log-2026-09-21.md ← 已上板：实测记录（先读这个）
 │
 ├── src_hls/README.md              ← HLS 处理链（语义契约 + cosim 排查）
 ├── rtl/README.md                  ← 手写 Verilog（含验证盲区说明）
@@ -91,5 +104,6 @@ README.md                          ← 总入口，含进度表与一键回归�
 
 1. 本文件 → `architecture-contract.md`（搞清做什么、为什么）
 2. `hardware-checklist.md`（买什么、怎么接，含上电前验证）
-3. 各模块 README（具体实现与各自的坑）
-4. **拿到板子后**：`board-bringup-guide.md`（**上电前**）
+3. `board-bringup-guide.md`（怎么上板)
+4. 各模块 README（具体实现与各自的坑）
+5. **接着上次排查**：`board-test-log-2026-09-21.md`（**实测记录，含未解项**）

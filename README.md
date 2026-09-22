@@ -4,19 +4,25 @@
 > 改造中 Sobel 相关内容已从主线移除，那个参照工程完整保留在 `legacy/sobel/`。
 > 详见下文「原 Sobel 工程在哪」。
 >
-> ## 当前进度（2026-09-16）
+> ## 当前进度（2026-09-22；**已上板**）
 >
 > | 部分 | 内容 | 状态 |
 > |---|---|---|
-> | **HLS 处理链** | `src_hls/gesture_preproc.cpp` | ✅ **csim + csynth + cosim 全过**（cosim 6/6 事务），IP 已导出 |
-> | **RTL 外设** | `rtl/`：DVP 采集 + SCCB + 异步 FIFO + IOBUF + 寄存器表 | ✅ 3/3 TB PASSED |
+> | **HLS 处理链** | `src_hls/gesture_preproc.cpp` | ✅ csim + csynth + cosim 全过（cosim 6/6 事务），IP 已导出 |
+> | **RTL 外设** | `rtl/`：DVP 采集 + SCCB + 异步 FIFO + IOBUF + 寄存器表 | ✅ 3/3 TB PASSED（主机仿真） |
 > | **BD 视频流水线** | `vivado/bd_video.tcl`（含预处理链 + Clocking Wizard + SCCB） | ✅ validate + 综合 + 实现 |
 > | **约束** | `vivado/constraints/video_io.xdc`（摄像头引脚已启用） | ✅ 综合验证生效 |
 > | **PS 侧驱动** | `sw/preproc_driver.c` | ✅ 主机自检 24/24 |
-> | **时序 / 比特流 / XSA** | 实现后实测 | ✅ **WNS +0.265 ns**（`All user specified timing constraints are met`），比特流 4.0 MB，XSA 750 KB |
-> | **OV5640 寄存器表** | `rtl/ov5640_regs.v` | ⚠️ **已替换为真实配置表**（250 条，正点原子来源，固化 640×480 RGB565），**但未上板实测** |
-> | HDMI 输出 | TMDS 编码器 | ⚠️ 未做（端口暂用 DRC 豁免，见 `vivado/README.md`） |
-> | 板级实测 | — | ❌ 板子未到 |
+> | **时序 / 比特流 / XSA** | 实现后实测 | ✅ **WNS +0.265 ns**，比特流 4.0 MB，XSA 750 KB |
+> | **板级实测 ②③** | DDR 自检 + 只跑预处理链（**不需摄像头**） | ✅✅ **11/11 全过**（2026-09-21，单帧 0.005 s） |
+> | **板级实测 ④~⑧** | 摄像头通路（采集 → 显示） | ❌ **卡在 SCCB**：`cfg_error=1`，尚未区分 XCLK / 接线（见下） |
+> | **OV5640 寄存器表** | `rtl/ov5640_regs.v` | ✅ 真表 250 条已进比特流并加载，⚠ **但配置事务未收到 ACK**，出图未验证 |
+> | HDMI 输出 | TMDS 编码器 | ⚠️ 未做（端口暂用 DRC 豁免，**上板不要接 HDMI 线**） |
+>
+> ⚠⚠ **上板前必读 `docs/board-test-log-2026-09-21.md`** ——
+> 首次上板的完整排查记录，含**一个"全流程静默通过、上板才炸"的 DMA bug**：
+> `C_SG_LENGTH_WIDTH` 默认 14 位 → 单次传输上限 16383 B，而帧要传 614400 B。
+> **修复前的比特流（含 `v0.2`/`v0.3` 两个 tag）上板必坏，必须用 `a4eabe6` 及之后的。**
 > 
 > ⚠ **WNS 逐次波动较大**：同一设计三次实现的实测为 +0.873 / +1.177 / **+0.265** ns。
 > 布线是随机过程，每次结果不同。
@@ -27,7 +33,8 @@
 > 本项目自己的 HLS 流水线余量是 **+43%**（csynth 估 143 MHz / 目标 100 MHz）。
 > 详见 [`report/design.md` §4.5](report/design.md)。
 >
-> **一句话**：软件侧全部就绪（含 OV5640 配置表），只差板子到货 + 上板实测。
+> **一句话**：软件侧全部就绪；**上板 ②③ 已通过**（DDR 自检 + 预处理链，11/11），
+> 摄像头通路卡在 SCCB（`cfg_error=1`），下一步用 ILA 探针区分 XCLK / 接线。
 > ⚠ 上板前必读 `docs/hardware-checklist.md` §3.3（引脚万用表复核）。
 >
 > ### 一键回归
@@ -47,11 +54,18 @@
 > **前四条不需要板子、不需要 license，已挂进 CI**（见下）。
 >
 > **板到了之后**，②③ 两步（DDR 自检 + 只跑预处理链，**不需要摄像头**）
-> 用这个脚本一次跑完：
+> ——✅ **2026-09-21 已实测通过（11/11）**。在 PYNQ 板上跑：
 >
 > ```bash
-> python3 host/bringup_check.py          # 在 PYNQ 板上跑
+> # ⚠ 三要素缺一不可：sudo + -E + 解释器全路径（详见实测记录 §2.3）
+> sudo -E /usr/local/share/pynq-venv/bin/python3 bringup_check.py \
+>      --bit /home/xilinx/gesture_system.bit
+> # 判定：*** BRINGUP CHECK PASSED ***
 > ```
+>
+> ⚠ 直接 `sudo python3 bringup_check.py` 会失败 —— `sudo` 会重置 PATH 与
+> `XILINX_XRT`，报 `No module named 'pydantic'` 或 `No Devices Found`。
+> 完整环境踩坑见 `docs/board-test-log-2026-09-21.md` §2。
 > **加跑 C/RTL 协同仿真**（验证综合后的 RTL 行为与 C 一致，慢）：
 >
 > ```bash
@@ -228,6 +242,7 @@ vivado -mode batch -source vivado/create_project.tcl -tclargs --synth 0
 
 | 坑 | 在哪 | 代价 |
 |---|---|---|
+| **AXI DMA 的 `C_SG_LENGTH_WIDTH` 默认 14 位** | `vivado/README.md` · `skill/pitfalls/README.md` P10 | 单次传输只搬前 16 KB，**"传输完成"照常置位**，下游 IP 静默卡死。上板排查耗时最长的一条 |
 | **XDC 不支持 `if`** | `vivado/README.md` | 约束整段静默失效，只给 CRITICAL WARNING |
 | **AXI 互连的时钟/复位是每端口一个** | `vivado/README.md` | 漏连则互连永远复位，**综合实现比特流全过、上板才炸** |
 | **wrapper 有两份副本** | `vivado/README.md` | 综合用旧的那份，报错指向 wrapper 但根因在别处 |
@@ -240,6 +255,9 @@ vivado -mode batch -source vivado/create_project.tcl -tclargs --synth 0
 ---
 
 ## 上板前的最后检查
+
+> ✅ **上电前步骤已执行**（2026-09-21）：SD 卡烧录镜像、网卡配置、引脚均到位。
+> 下面是排查顺序，**摄像头通路目前卡在第 ① / ② 步之间**。
 
 **⚠ 最重要的一条**：摄像头模块的原理图是**镜像编号**，
 引脚映射按镜像解读推导，但**未经实测**。
@@ -259,6 +277,14 @@ vivado -mode batch -source vivado/create_project.tcl -tclargs --synth 0
 ⑤ 最后才查数据线
 ```
 
+> ⚠ **本机没有示波器/逻辑分析仪**，上面这组"量引脚"的路子走不通。
+> 已改用 **ILA**（免费、走 JTAG、还能看 `sccb_0`/`clk_wiz` 的**内部**信号，
+> 比外部仪器能看到更多）—— 详见 `docs/board-test-log-2026-09-21.md` §5.2。
+
 **摄像头配置表**：✅ 2026-09-17 已由占位表换成**真表**
 （250 条，正点原子来源，固化 640×480 RGB565）。
-⚠ **未上板实测** —— 能否出图要上板才知道。
+
+> ⚠ **2026-09-21 上板已排除一种可能**：`sccb_0` 的 `N_REGS=250` **确实生效了**
+> —— ILA 抓到 `sccb_0/cfg_error=1`，说明配置事务**发出来了**、只是没收到
+> OV5640 的 ACK。**所以问题不再在表内容，而在 XCLK 或接线**。
+> 判据与下一步见实测记录 §5.0。

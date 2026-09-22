@@ -46,7 +46,7 @@
 
 ---
 
-## 0. 先说结论：硬件已定，只剩 1 个阻塞
+## 0. 先说结论：**已上板，②③ 通过，卡在摄像头 SCCB**
 
 **摄像头选型已定：PMOD-CAMERA v1.0（MUSE LAB），直插 Pmod A + Pmod B。**
 所以 BD 里的 `clk_wiz_xclk` 和 `io_xclk` 约束**都要保留**（见 §1.1）。
@@ -55,18 +55,21 @@
 |---|---|---|
 | ~~B1~~ | 摄像头选型 | ✅ **已定：PMOD-CAMERA v1.0（2026-09-17）** |
 | ~~B2~~ | `io_xclk` 引脚约束 | ✅ **不缺** —— `video_io.xdc:183` 有 `PACKAGE_PIN Y18`（见 §1.2 的更正说明） |
-| **B3** | `rtl/ov5640_regs.v` 是**占位寄存器表** | ❌ **仍是阻塞** —— `io_pclk` 不会有波形，摄像头不出图 |
+| ~~B3~~ | `rtl/ov5640_regs.v` 是**占位寄存器表** | ✅ **2026-09-17 已换真表**；✅ 2026-09-21 上板确认**事务有发出**（见下） |
 | ~~B4~~ | PS7 DDR 参数 | ✅ **2026-09-17 已修复并重跑验证**（见 §1.4） |
+| **B5** | **摄像头不出图** | ❌ **当前唯一阻塞** —— ILA 抓到 `sccb_0/cfg_error=1`（配置无 ACK），**未区分 XCLK / 接线**（见 §5.3.1） |
 
-> **现在唯一的硬阻塞是 B3（寄存器表）。**
+> **B3 已消掉** —— 换真表后表内容不再是嫌疑；上板进一步确认
+> **事务发得出去**，只是收不到 ACK。**现在的阻塞是 B5。**
 >
-> 另外还有两件"上电前必做"的事（不是代码问题）：
+> **§5.2（只跑预处理链）已经做掉了** —— 2026-09-21 实测 **11/11 全过**，
+> 单帧 ≈5 ms。完整过程见 [`board-test-log-2026-09-21.md`](board-test-log-2026-09-21.md)。
+>
+> 还有一件"上电前必做但**至今没做**"的事（不是代码问题）：
 > - **引脚万用表复核**（§2.2）—— PMOD-CAMERA 的原理图是"镜像编号"，
 >   XDC 里的映射是**推理**的，从未实测。插错方向会让 3V3 与 GND 反接。**会烧板。**
-> - 短路检查（§2.1）
->
-> **§5.2（只跑预处理链）完全不受 B3 影响** —— 它不碰摄像头，
-> **现在就可以先做掉这一步**，把 PL 的预处理链 + DMA + DDR 通路验通。
+>   ⚠ 它同时也是 B5 的**候选原因之一**（接线错 = SCCB 收不到 ACK）。
+> - 短路检查（§2.1）—— ✅ 已做
 
 ---
 
@@ -159,8 +162,12 @@ J3 → Pmod B（8 根）： D6 D4 D2 D0 D7 D5 D3 D1  ← 数据线是**交错**�
 
 > ✅ **2026-09-17 更新**：`rtl/ov5640_regs.v` **已由占位表换为真表**
 > （250 条，来源正点原子 `i2c_ov5640_rgb565_cfg.v`，固化为 640×480 RGB565）。
-> **本节由此不再是硬阻塞** —— 但表内容**未上板实测**，
-> 若 `io_pclk` 仍无波形，要查表内容/接线/时序，不再能一口咬定是占位表的锅。
+> **本节由此不再是硬阻塞**。
+>
+> ✅ **2026-09-21 上板进一步排除"表没发出去"**：ILA 抓到
+> `sccb_0/cfg_error = 1` —— 配置事务**发出去了**，只是**没收到 OV5640 的 ACK**。
+> 所以**问题不在表内容**，而在 **XCLK 是否有时钟 / SDA·SCL 接线是否正确**。
+> 判据与下一步见 [`board-test-log-2026-09-21.md`](board-test-log-2026-09-21.md) §5.0。
 >
 > ---
 >
@@ -340,6 +347,42 @@ ifconfig
 
 浏览器开 `http://<板子IP>:9090` → Jupyter。或者直接用串口跑 Python。
 
+### 3.4 在板上跑 Python：**必须 `sudo -E` + 解释器全路径**（2026-09-21 实测）
+
+> ⚠⚠ **这一节是首次上板时前三次失败的全部原因** ——
+> 三次报错看起来毫不相干，其实是**同一个根因**：`sudo` 清空了环境。
+
+```bash
+# ✅ 唯一正确的调用方式（三要素缺一不可）
+sudo -E /usr/local/share/pynq-venv/bin/python3 <脚本> [参数]
+```
+
+| 要素 | 为什么缺不得 |
+|---|---|
+| `sudo` | 加载 overlay / 访问 MMIO 需要 root |
+| `-E` | **保留** `XILINX_XRT` 等环境变量 |
+| **解释器写全路径** | 绕开 `sudo` 对 PATH 的重置，用 pynq-venv 的 Python |
+
+**三种典型错误写法，报错各不相同但根因同一个**：
+
+| 写法 | 报错 |
+|---|---|
+| `sudo python3 xxx.py` | `ModuleNotFoundError: No module named 'pydantic'`（PATH 被重置，指向系统 Python） |
+| `python3 xxx.py` | `OSError: Root permissions required` |
+| `sudo /usr/.../python3 xxx.py`（漏 `-E`） | `RuntimeError: No Devices Found`（`is the XRT environment sourced?`） |
+
+> ⚠ **另有两条相关的坑**：
+> - `RuntimeError: Overlay is not downloaded` —— 此版 PYNQ 要求**先加载 overlay**，
+>   `allocate()` 才能用
+> - **`scp` 要在 PC 上跑**（提示符 `xiaomu@DESKTOP-...`），
+>   Python 要在**板子**上跑（提示符 `xilinx@pynq`）。
+>   在板子上敲 `scp` 会报源路径找不到。
+
+**同类的环境坑还有**（详见实测记录 §2）：
+SD 卡未烧镜像（串口完全无输出）、IP 配错网卡
+（笔记本有两块网卡，链路实际走 `以太网 2`（USB 网卡），内置口显示
+`Disconnected` **不代表线没插**）。
+
 ---
 
 ## 4. 加载 overlay
@@ -440,33 +483,45 @@ ol = Overlay("gesture_system.bit", ignore_version=True)
 ① 加载 overlay，ip_dict 认全           → 本文 §4
 ② DDR 能分配 buffer，读写一致           → 本文 §5.1      ← 不需要摄像头
 ③ 只跑预处理链（不碰摄像头）            → 本文 §5.2      ← 不需要摄像头
-④ io_xclk 有 24 MHz                    → 本文 §5.3
-⑤ io_scl 有脉冲（SCCB 在跑）            → 本文 §5.3
-⑥ io_pclk 有波形（摄像头配置成功）      → 本文 §5.3
-⑦ io_href / io_vsync 有脉冲             → 本文 §5.3
-⑧ 数据线 io_d 不是恒 0                  → 本文 §5.3
+④~⑧ io_xclk / io_scl / io_pclk / href / vsync / io_d → 本文 §5.3
 ⑨ VDMA 能抓到帧                        → 本文 §5.4   ← 依赖 ⑥⑦⑧
 ⑩ 全链路：摄像头 → 96×96               → 本文 §5.5   ← 依赖 ⑨+③
 ```
 
-**②③ 不需要摄像头**，所以**摄像头还没到货也能先做掉** —— 现在就可以做。
+| 步骤 | 状态 | 何时做的 / 结果 |
+|---|---|---|
+| ① overlay | ✅ | 2026-09-21，6 个 IP 全认到，地址与 `.hwh` 逐条吻合 |
+| ② DDR 自检 | ✅ | 2026-09-21，**4/4** |
+| ③ 预处理链 | ✅ | 2026-09-21，**11/11 全过**，单帧 **≈5 ms** |
+| ④~⑧ 摄像头 | ❌ | **未通** —— 见 §5.3 的**更正**：卡在 SCCB，`cfg_error=1` |
+| ⑨⑩ | ⬜ | 依赖 ④~⑧，未开始 |
 
-> ### ✅ ②③ 已脚本化：`host/bringup_check.py`
+> ⚠⚠ **③ 的通过不是一次就成的**：第一次上板卡死在 `ap_done` 超时，
+> 根因是 **BD 里 AXI DMA 的 `C_SG_LENGTH_WIDTH` 用了默认 14 位**
+> （单次上限 16383 B，而帧要传 614400 B）→ 只搬了前 16 KB
+> → 下游 IP 等不到剩余输入 → 整条 DATAFLOW 停摆。
+> **修复前的比特流（含 `v0.2`/`v0.3` 两个 tag）上板必坏**，
+> 必须用 `a4eabe6` 及之后的。
+> **完整排查过程见 [`board-test-log-2026-09-21.md`](board-test-log-2026-09-21.md) §三。**
+
+**②③ 不需要摄像头**，所以**摄像头还没到货也能先做掉** —— ✅ **已做掉**。
+
+> ### ✅ ②③ 已脚本化：`host/bringup_check.py` —— 已在真板上跑通
 >
 > 上面 ②③ 两步的代码**不用手敲**了 —— 已做成可直接跑的脚本：
 >
 > ```bash
-> python3 host/bringup_check.py            # 跑 ②③
-> python3 host/bringup_check.py --step 2   # 只跑 DDR 自检
-> python3 host/bringup_check.py --json r.json   # 结果落盘（报告用）
+> # ⚠ 三要素缺一不可：sudo + -E + 解释器全路径（见 §3.4）
+> sudo -E /usr/local/share/pynq-venv/bin/python3 bringup_check.py \
+>      --bit /home/xilinx/gesture_system.bit
 > ```
 >
-> 判定：`*** BRINGUP CHECK PASSED ***`。
+> 判定：`*** BRINGUP CHECK PASSED ***`（实测输出：`11 项检查全过`）。
 > 它会在每一步给出**针对性的排查提示**（比如输出全黑时列出三个常见原因）。
 >
-> ⚠ **④~⑧ 需要示波器/逻辑分析仪，脚本不做** ——
-> 那些是模拟信号的逐级排查，没法自动化。
-> 但 ②③ 脚本化之后，**摄像头插上时只剩一条线要查**。
+> ⚠ **别用 `sudo python3 bringup_check.py`** —— `sudo` 会重置 PATH 与
+> `XILINX_XRT`，报 `No module named 'pydantic'` 或 `No Devices Found`。
+> **2026-09-21 前三次失败全是这个**，详见 §3.4。
 
 **注意本文的 § 编号和别的文档会撞车**（比如 `architecture-contract.md` 也有 §5）。
 下文凡是引用项目内的其他文档，一律写成 `文件名 §x.y`；
@@ -583,12 +638,25 @@ python host/dump_frame.py show board.bin --png out.png
 
 ---
 
-### 5.3 摄像头信号逐级排查（**有了示波器/逻辑分析仪再做**）
+### 5.3 摄像头信号逐级排查
 
-> ⚠ 没有示波器或逻辑分析仪的话，这一节做不了。
-> `docs/hardware-checklist.md` §二自己写了：
-> "没有它，只能靠猜和改代码，调试周期会从半天变成一周"。
-> **这是本项目最值得买的一个 ¥40 工具。**
+> ⚠⚠ **更正（2026-09-21）：本节原写"没有示波器/逻辑分析仪就做不了"。**
+> **那是错的 —— 本机两样都没有，照样定位到了 SCCB。**
+> 突破口是 **ILA**：它免费、走 JTAG（PYNQ-Z2 那根 Micro-USB 兼作 JTAG）、
+> **不需要接线**，而且能看到**外部仪器看不到的内部信号**
+> （`sccb_0` / `clk_wiz` 的内部节点都能探）。
+>
+| | 外部仪器 | **ILA** |
+|---|---|---|
+| 花钱 | ¥40–80 | **0** |
+| 接线 | 要飞线 | **不用** |
+| 看内部信号 | ❌ 只能看引脚 | ✅ **内部也能看** |
+>
+> 所以**先看 §5.3.1**，再回来考虑买不买那 ¥40 的表。
+
+**两种查法，按你手上有什么选一种：**
+
+**A. 有示波器/逻辑分析仪** —— 按下面的表量引脚。
 
 按顺序量，**每一级失败都给出确定的结论**：
 
@@ -605,6 +673,61 @@ python host/dump_frame.py show board.bin --png out.png
 - ① 有、② 有、③ 没有 → **SCCB 配置失败**，是寄存器表或 SCCB 时序
 - ③ 有、④⑤ 没有 → 摄像头在工作，**问题在时序或数据线**
 
+**B. 没有仪器 → 用 ILA（本项目实际走的路，见 §5.3.1）**
+
+---
+
+### 5.3.1 ⭐ 用 ILA 查摄像头（**没有仪器时的唯一出路**，2026-09-21 实操）
+
+**为什么非它不可 —— 软件侧四个观测点全部没接出来：**
+
+| 想看什么 | 在哪 | 软件能读吗 |
+|---|---|---|
+| `sccb_0` 的 `cfg_done`/`cfg_error` | RTL 输出 | ❌ **无 AXI 接口**（纯 module_ref） |
+| `clk_wiz_xclk` 的 `locked` | MMCM 输出 | ❌ **没引出**（`clk_out1` 直连 `io_xclk`） |
+| `dvp_capture` 的 `frame_cnt`/`line_cnt` | RTL 输出 | ❌ **BD 里悬空**（作者留了观测点，集成时没接） |
+| VDMA 帧计数 | AXI-Lite | ✅ 能读 —— **读了，恒 0** |
+
+**怎么开**：`vivado/bd_video.tcl` 里的 `set use_ila 0` 改成 `1`，重跑
+`create_project.tcl`。⚠ **调试完记得改回 0 再重新构建** ——
+开着 ILA 会让 BRAM 从 18% 涨到 **52.5%**，报告里的资源数不再代表真实设计。
+
+**⚠ 三个必需的取舍（都是踩出来的）：**
+
+1. **采样时钟用 `FCLK_CLK0`，绝不能用 `io_pclk`**
+   —— `io_pclk` 是**摄像头产生的**，摄像头不出图时这个时钟根本不存在
+   → ILA 自己也停摆 → 什么波形都看不到。`FCLK_CLK0` 来自 PS，**永远在**。
+2. **探针只能接输入方向的信号**
+   —— `io_sda` 是双向、`io_xclk`/`io_scl` 是输出，接上去报
+   `[BD 41-701] connect_bd_net requires at least two pins`，
+   **而且不告诉你是哪个引脚**。
+3. **探针要直插嫌疑模块的内部**
+   —— 第一版探针全挑"外面看得见的"信号，结果**全静止时无法区分**
+   「XCLK 没出」和「SCCB 没配上」（两者在那些探针上长得一模一样）。
+   改成直看内部节点（如 `sccb_cfg_error`、`xclk_out`）才有分辨力。
+
+**本项目实测结论**（真表已排除，问题在 XCLK 或接线）：
+
+```
+ILA 抓到：sccb_0/cfg_error = 1
+  → SCCB 配置事务发得出去，但收不到 OV5640 的 ACK
+  → 摄像头从未被初始化 → 不出图 → 无 PCLK → VDMA 帧计数恒 0
+```
+
+**尚未区分**（下一步要定的）：
+
+| 可能 | 说明 |
+|---|---|
+| **A. XCLK 没出** | 摄像头无主时钟 → 不响应 SCCB。项目注释担心过：MMCM 的 VCO=1200 MHz 取到 **-1 速度等级上限**，备选参数 `M=6/D=1/VCO=600/O=25` |
+| **B. XCLK 正常，SDA/SCL 接线错** | 引脚映射是**"镜像"推理的，从没实测过**（§2.2 的万用表复核一直没做） |
+
+**下一步**：加两个不受欠采样影响的探针 ——
+`clk_wiz_xclk/locked`（静态信号，锁定=1）+ `sccb_0/sda_i`（从机应答）。
+`locked` 能一刀切开 A 和 B。
+
+> ⚠ **`iobuf_wrap.v` 是这条链上的已知验证盲区** —— 它例化 Xilinx 原语
+> `IOBUF`，iverilog 不认，**功能从没被仿真验证过**，而它正是 SDA 双向那条路的实现。
+
 ---
 
 ### 5.4 VDMA 抓帧
@@ -614,11 +737,37 @@ python host/dump_frame.py show board.bin --png out.png
 VDMA 是 **3 帧缓存**（`c_num_fstores=3`），地址不硬编码：
 【终端：PYNQ · Jupyter 或串口】
 
+> ⚠⚠ **`ol.vdma` 在本版 PYNQ 上直接用不了**（2026-09-21 实测）：
+> ```python
+> ol.vdma   # AttributeError: 'AxiVDMA' object has no attribute 's2mm_introut'
+> ```
+> **根因**：PYNQ 的 `AxiVDMA` 专用驱动**构造时硬要求中断**，
+> 而**本 BD 里所有中断都悬空**（没接 PS 的 `IRQ_F2P` —— 项目全程轮询，
+> 那是**有意设计，不是 bug**）。
+>
+> **两种可用的替代写法**（都实测过）：
 
 ```python
-vdma = ol.vdma
-# 地址从 hwh/ip_dict 读，不要写死 0x44A10000
+# 写法 A（推荐）：清理 ip_dict 后构造 DefaultIP
+#   pop 掉 interrupts / driver —— 它们是 PYNQ 选专用驱动的开关
+from pynq import DefaultIP
+info = dict(ol.ip_dict['vdma'])
+info.pop('interrupts', None)
+info.pop('driver', None)
+vdma = DefaultIP(info['phys_addr'], info['addr_range'])
+# 现成实现见 host/vdma_bypass_test.py / host/camera_probe.py
+
+# 写法 B：裸 MMIO
+from pynq import MMIO
+vdma = MMIO(info['phys_addr'], info['addr_range'])
 ```
+
+> ⚠ **VDMA 寄存器偏移要从 `.hwh` 提取，不要凭记忆** ——
+> `S2MM_VSIZE` 在 **`0xA0`** 而不是 `0x50`（`0x50` 是 MM2S 的同名寄存器）。
+
+> ⚠ **判据不能是"帧计数非零"** —— 那个值可能是**复位前的陈旧值**。
+> 必须是 **"本次运行中是否增长"**（`camera_probe.py` 第二版已改正；
+> 第一版有假阳性。实测：基线 1 → 结束 1，变化 **0** 次，缓冲区全零）。
 
 **判定**：把 DDR 里 VDMA 写的帧 dump 出来，用 `dump_frame.py show` 看到**摄像头画面**
 （不是全黑、不是噪声）。
@@ -705,7 +854,7 @@ vivado -mode batch -source create_project.tcl -tclargs --keep
 
 ---
 
-### 6.5 现象 → 先查哪（**板到当天最常翻的一节**）
+### 6.5 现象 → 先查哪（**上板时最常翻的一节**）
 
 §5 的每一步都写了「**应该看到什么**」。这一节反过来写
 「**实际看到什么 → 先查哪**」—— 因为上板时你手里只有现象。
@@ -738,6 +887,26 @@ vivado -mode batch -source create_project.tcl -tclargs --keep
 | **① overlay 版本对不对** | `.hwh` 与 `.bit` **必须配套**（同一次综合产出）。配错时 PYNQ 不报"版本不符"，而是**行为诡异** |
 | **② `ip_dict` 里的地址与 `.hwh` 一致吗** | `bringup_check.py` 的 `print_info()` 已经打出来了，对照 §4 那张表 |
 | **③ `dma_in` / `dma_out` 有没有认反** | ⚠ 认反了**直接死锁** —— 而且看起来像"IP 没反应" |
+| **④ DMA 的 `LENGTH` 写进去没有？** | ⭐ **2026-09-21 实测的真根因** —— 写 `614400` 读回 **8192**（= `写入 mod 16384`）说明 **BD 里 AXI DMA 的 `C_SG_LENGTH_WIDTH` 是默认 14 位**，单次只能传 16383 B。详见下框 |
+
+> ### ⭐ 卡在 `ap_done` 时**第一件要做的事**：读回 DMA 的 LENGTH
+>
+> **别先怀疑硬件、别先碰摄像头** —— 读一次寄存器就能排除一大类问题：
+>
+> ```
+> 写 LENGTH = 614400  →  读回 8192   ← 写入 mod 16384，中招了
+> 写 LENGTH = 123456  →  读回 8768
+> 写 LENGTH = 65536   →  读回 0
+> ```
+>
+> **判据**：读回值 = 写入值 **mod 16384** → `C_SG_LENGTH_WIDTH` 是默认 14 位。
+> 修复：`bd_video.tcl` 里两个 DMA 都加 `CONFIG.c_sg_length_width {24}`，重出比特流。
+>
+> ⚠ **这个 bug 的症状极具误导性**：`dma_in` 的 `IOC_Irq` **照常置位**
+> （"传输完成"看起来完全正常）、`CTRL=0x01` 显示 IP 确实在跑、
+> **一条报错都没有**，只有 `ap_done` 一直不来。
+> **修复前的比特流（含 `v0.2`/`v0.3` 两个 tag）上板必坏。**
+> 完整排查见 [`board-test-log-2026-09-21.md`](board-test-log-2026-09-21.md) §三。
 
 > ⚠ **这一步不需要摄像头**。若在这里卡住，**不要**去碰摄像头，
 > 那只会多引入一个变量。
@@ -862,15 +1031,16 @@ proc run_with_retry {run_name launch_args {max_attempts 3}} {
 
 | 项 | 状态 |
 |---|---|
-| 板上时序余量 | ⚠ **RTL 级** WNS = **+0.265 ns**、WHS = +0.051 ns（2026-09-17 最后一次实现，`All user specified timing constraints are met`）。⚠ **逐次波动大**（+0.873 / +1.177 / +0.265，布线是随机的）。⚠⚠ **且该 WNS 属于 AMD `v_tc` IP 内部，不是本设计的余量**（见 `report/design.md` §4.5）；本项目 HLS 流水线余量 +43%。**板级实测仍未做** |
+| 板上时序余量 | ⚠ **RTL 级** WNS = **+0.265 ns**、WHS = +0.051 ns（2026-09-17 最后一次实现，`All user specified timing constraints are met`）。⚠ **逐次波动大**（+0.873 / +1.177 / +0.265，布线是随机的）。⚠⚠ **且该 WNS 属于 AMD `v_tc` IP 内部，不是本设计的余量**（见 `report/design.md` §4.5）；本项目 HLS 流水线余量 +43%。**板级功耗/温度实测仍未做** |
 | PS7 DDR 参数 | ✅ **已修复并重跑验证**（§1.4），XSA 里是 `MT41K256M16 RE-125` |
 | 摄像头模块选型 | ✅ **已定：PMOD-CAMERA v1.0，直插 Pmod A+B**（2026-09-17，§1.1） |
 | `io_xclk` 引脚约束 | ✅ **存在**（`video_io.xdc:183` = `Y18`，实现报告 `Constraint=FIXED`）。初版误判为"缺失"已更正（§1.2） |
-| ~~`ov5640_regs.v` 寄存器表~~ | ✅ **2026-09-17 已换为真表**（250 条，固化 640×480）。⚠ **未上板实测** |
-| 引脚映射（万用表复核） | ❌ **未做**（§2.2） |
-| PYNQ 镜像与 2025.2 兼容性 | ❌ **未验证** |
+| ~~`ov5640_regs.v` 寄存器表~~ | ✅ **2026-09-17 已换为真表**（250 条，固化 640×480）。✅ **2026-09-21 上板确认事务发出、但无 ACK**（`cfg_error=1`）→ 问题在 XCLK/接线 |
+| 引脚映射（万用表复核） | ❌ **未做**（§2.2）—— ⚠ **当前故障的候选原因之一** |
+| PYNQ 镜像与 2025.2 兼容性 | ⚠ **部分**：overlay 能加载并认全 6 个 IP；**未做版本专项验证** |
 | HDMI 输出 | ❌ 未实现（BD 里没有 TMDS 编码器；22 个端口在比特流里悬空，**上板不要接 HDMI 线**） |
-| 板上实测 | ❌ **完全未做**（板子未到货） |
+| 板上实测 ②③ | ✅ **2026-09-21 通过**：DDR 自检 4/4 + 预处理链 **11/11**，单帧 ≈5 ms（**不需要摄像头**） |
+| 板上实测 ④~⑧ | ❌ **未通**：摄像头不出图，ILA 定位到 `sccb_0/cfg_error=1`（见实测记录 §5） |
 | 建工程→综合→实现→比特流→XSA 全流程 | ✅ **2026-09-17 完整跑通**（0 error / 0 critical warning，顶层 `bd_video_wrapper`） |
 
 ---
