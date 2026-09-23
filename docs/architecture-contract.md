@@ -97,59 +97,117 @@
 
 | 项 | 值 |
 |---|---|
-| **位置** | PS DDR，由 VDMA 写入 |
+| **位置** | PS DDR，由 **`dma_out`（AXI DMA S2MM）写入** |
 | **格式** | `uint8` 灰度，行优先连续存放 |
 | **尺寸** | **96 × 96**（9216 字节） |
 | **对齐** | 4 字节对齐（DMA 要求） |
 | **取值范围** | 0–255，**不做归一化**（归一化由 CNN 侧负责） |
 | **物理地址** | 由 PL 侧驱动分配后**写入寄存器**告知 CNN 侧，**不硬编码** |
 
-### 3.2 握手寄存器
+> ⚠ **更正（2026-09-23）**：本行原先写"由 **VDMA** 写入"—— **那是错的**。
+> VDMA 走的是 **HDMI 显示通路**（摄像头帧 → DDR → 显示），
+> 与本 buffer 无关。写 96×96 的是预处理链路末端的 **`dma_out`（AXI DMA）**。
+> 两套 DMA 用途不同，别找错对象。
 
-参照现有 `sobel_driver.h` 的寄存器风格，新增 AXI-Lite 状态寄存器：
+#### 现成样例数据（PC 上就能用，**不需要板子**）
 
-| 偏移 | 名称 | 方向 | 含义 |
+CNN 侧在 PC 上调模型时，**最需要的是数据格式和一个可对照的样本**，
+而不是比特流。仓库里已备好：
+
+| 文件 | 内容 |
+|---|---|
+| `samples/frame_640x480_rgb565.bin` | 输入：640×480 RGB565，`uint16` 小端行优先，614400 字节 |
+| `samples/golden_96x96_gray.bin` | **期望输出**：96×96 uint8 灰度，9216 字节（与板上实测逐字节一致） |
+
+```python
+import numpy as np
+rgb  = np.fromfile('samples/frame_640x480_rgb565.bin', dtype='<u2').reshape(480, 640)
+gray = np.fromfile('samples/golden_96x96_gray.bin',     dtype=np.uint8).reshape(96, 96)
+```
+
+> **样例参数**：ROI=(160,80) 320×320，`thresh_mode=1`、`thresh_offset=-8`、
+> `gain=256`，三级全开。
+> 重新生成用：`python host/gesture_golden.py --input <frame.bin> --roi 160 80 320 320`
+>
+> ⚠ **ROI 三处必须一致**（生成输入的图 / 板上 `config()` / golden `--roi`），
+> 差一个就是另一个答案。
+
+### 3.2 驱动接口（**2026-09-23 更正：以下为已实现的真实情况**）
+
+> ⚠⚠ **本节原先描述了一套"握手寄存器"（`INPUT_ADDR` / `FRAME_SEQ` /
+> `frame_ready` / `CTRL.capture_start`）—— 那套寄存器从未实现。**
+> 在 BD（`bd_video.tcl`）与 RTL 里 grep 只有一句注释。
+> **照那份假契约写代码必然跑不通。** 下面改成实际可用的接口。
+>
+> 为什么当初会写那套：它假设了一条"摄像头自动采集 → PS 轮询"的通路。
+> 实际实现是**由 PS 主动喂数据 + 主动取结果**，压根不需要那套握手。
+
+#### 实际可用的 IP（`overlay.ip_dict` 里认到的）
+
+| IP | 作用 | AXI-Lite 基地址 |
+|---|---|---|
+| `gesture_preproc` | 预处理链，参数与状态都在 `CTRL(0x00)` | `0x40000000` |
+| `dma_in` | MM2S：DDR → 预处理链输入 | `0x41E00000` |
+| `dma_out` | S2MM：预处理链输出 → DDR | `0x41E10000` |
+
+> ⚠ **地址不要硬编码** —— 重新综合后会变。应从 `overlay.ip_dict` 读。
+
+#### `gesture_preproc` 寄存器（与 HLS 官方头 `xgesture_preproc_hw.h` 逐条核对过）
+
+| 偏移 | 名称 | 读写 | 说明 |
 |---|---|---|---|
-| `0x00` | `CTRL` | 写 | bit0 = `capture_start`（启动采集） |
-| `0x04` | `STATUS` | 读 | bit0 = `frame_ready`，bit1 = `busy` |
-| `0x10` | `INPUT_ADDR` | 读/写 | **96×96 buffer 的物理地址**（CNN 侧读这个） |
-| `0x18` | `FRAME_SEQ` | 读 | 帧序号，每次写完 +1（用于丢帧检测） |
-| `0x20` | `THRESH` | 写 | 自适应阈值的手动偏置 |
-| `0x28` | `ROI_X` / `ROI_Y` | 写 | ROI 位置（调试用） |
+| `0x00` | `CTRL` | R/W | **控制位与状态位都在这里**：bit0 `ap_start`(W)、bit1 `ap_done`(R)、bit2 `ap_idle`(R)、bit3 `ap_ready`(R) |
+| `0x04` | `GIE` | W | 全局中断使能 —— ⚠ **不是状态寄存器** |
+| `0x08` / `0x0C` | `IER` / `ISR` | W/R | 通道中断使能 / 状态 |
+| `0x10` | `WIDTH` | W | 输入宽（额定 640） |
+| `0x18` | `HEIGHT` | W | 输入高（额定 480） |
+| `0x20` | `THRESH_MODE` | W | 0=灰度直通，1=二值化 |
+| `0x28` | `THRESH_OFFSET` | W | **有符号 32 位补码**，范围 −128..127 |
+| `0x30` | `GAUSS_EN` | W | 高斯使能 |
+| `0x38` | `SOBEL_EN` | W | Sobel 使能 |
+| `0x40` | `MORPH_EN` | W | 闭运算使能 |
+| `0x48` | `GAIN` | W | Sobel 增益（默认 256） |
+| `0x50` | `ROI_X` | W | ROI 原点 X |
+| `0x58` | `ROI_Y` | W | ROI 原点 Y |
+| `0x60` | `ROI_W` | W | ROI 宽，**≥ 96** |
+| `0x68` | `ROI_H` | W | ROI 高，**≥ 96** |
 
-> ⚠ **ROI 尺寸下限：96×96**（2026-09-23 新增的硬约束）
+> ⚠⚠ **状态位在 `CTRL(0x00)`，不在 `0x04`。**
+> `0x04` 是 `GIE`（全局中断使能）—— 本项目在 `sobel_driver` 上踩过这个坑：
+> 把 `0x04` 当状态读，轮询永远等不到，而仿真自己造假值掩盖了它。
 >
-> 缩放采用**按比例分配**：第 j 个输出覆盖源区间
-> `[roi_x + j*roi_w/96, roi_x + (j+1)*roi_w/96)`（整除）。
-> 隐含除数 `roi_w/96`、`roi_h/96` —— **ROI 小于 96×96 会除零**。
->
-> 三处实现必须一致（已同步）：
-> `src_hls/gesture_preproc.cpp` 顶层参数检查 ·
-> `sw/preproc_driver.c` 的 `check_roi()` ·
-> `host/gesture_overlay.py` 的 `check_config()`。
->
-> 违反时 PL 会**直接 return 不读 stream**（不产生输出，也不阻塞），
-> PS 侧则返回 `PREPROC_ERR_PARAM` —— 免得现象变成"跑完没输出"难以定位。
->
-> 旧实现（固定步长 + 补零）允许更小的 ROI，但输出大部分恒为零，
-> 对 CNN 无意义，故有意收紧。
+> ⚠ `THRESH_OFFSET` 必须写 **32 位补码**：`(uint32_t)(int32_t)v`。
+> 写成 `& 0xFF` 会让 −8 变成 +248，**输出全黑且不报错**。
 
-**握手时序**：
+#### 一次完整运行的执行顺序（**顺序不能反**）
 
 ```
-PL 写完一帧 ──► frame_ready=1, FRAME_SEQ++
-                        │
-CNN 侧轮询到 ───────────┘
-     │
-     ├─► 读 INPUT_ADDR 指向的 9216 字节
-     │
-     └─► 回写 frame_ready=0（表示已消费）
+1. PS 分配两块 4 字节对齐的 DDR 缓冲：
+     输入 614400 字节（640×480 RGB565）
+     输出   9216 字节（96×96 uint8）
+2. 写 gesture_preproc 参数（WIDTH/HEIGHT/THRESH/ROI 等）
+3. 【先武装 S2MM】dma_out：写 DSTADDR=out_buf 物理地址、DMACR.RS=1、LENGTH=9216
+4. 【再启 MM2S】dma_in ：写 SRCADDR=in_buf  物理地址、DMACR.RS=1、LENGTH=614400
+5. 【最后 ap_start】写 CTRL bit0 = 1
+6. 轮询 CTRL bit1 (ap_done) 直到置位
+7. 读 out_buf（PS 直接读，或让 CNN 侧读）—— 这就是喂给 CNN 的 96×96 灰度
 ```
 
-> **不用中断的原因**：现有驱动是轮询 `ap_done`（README §8 已知限制）。
-> 中断改造留到功能跑通之后，先用轮询把链路验证完。
-> 若后续上中断，PL 的 `interrupt` 输出接 PS 的 `IRQ_F2P`，
-> 需在 BD 里开 `PCW_USE_FABRIC_INTERRUPT`。
+> ⚠ **3 → 4 → 5 的顺序不能反**：S2MM 没先武装的话，预处理输出的第一拍
+> 没有接收方，数据会丢。裸机 C 驱动（`sw/preproc_driver.c`）与 PYNQ 版
+> （`host/gesture_overlay.py`）是**同一套顺序**，改一处要同步另一处。
+
+> ⚠ **cache 一致性**：DMA 绕过 CPU cache 直接读写 DDR。
+> PS 写完输入必须 **flush**，读完输出必须 **invalidate** ——
+> 漏了会拿到旧数据，**且不报任何错**。PYNQ 的 `pynq.allocate` 出来的
+> buffer 是 cache 一致的，但显式 flush/invalidate 仍更保险。
+
+#### 给 CNN 侧的最小接口
+
+CNN 侧**只需要**：一个 9216 字节、4 字节对齐的物理地址，内容是
+96×96 行优先 uint8 灰度（0–255，**不归一化**）。
+
+**不需要**关心数据是摄像头来的还是文件来的 —— 这正是本契约的价值。
 
 ### 3.3 对拍机制（跨侧协作的保障）
 

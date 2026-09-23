@@ -112,6 +112,7 @@ README.md                          ← 总入口，含进度表与一键回归�
 ├── docs/hardware-checklist.md            ← 买什么、怎么接
 ├── docs/gui-reproduction-guide.md ← 怎么点出来
 ├── docs/board-test-log-2026-09-23.md ← 已上板：实测记录（**先读这个**）
+├── samples/README.md              ← 给 PS/CNN 侧的样例数据（PC 上即可用）
 │
 ├── src_hls/README.md              ← HLS 处理链（语义契约 + cosim 排查）
 ├── rtl/README.md                  ← 手写 Verilog（含验证盲区说明）
