@@ -81,40 +81,36 @@ void crop_scale(const ap_uint<16> *src, ap_uint<8> *dst,
                 int width, int height,
                 int roi_x, int roi_y, int roi_w, int roi_h)
 {
-    /* 与 HLS 侧一致：步长向上取整，且最小为 1 */
-    int step_x = (roi_w + OW - 1) / OW;
-    int step_y = (roi_h + OW_H - 1) / OW_H;
-    if (step_x < 1) step_x = 1;
-    if (step_y < 1) step_y = 1;
+    memset(dst, 0, sizeof(ap_uint<8>) * (size_t)OPIX);
 
-    int n_out = 0;
-    ap_uint<24> acc = 0;
-    int cx = 0, cy = 0;
+    /* ⚠⚠ 必须与 HLS 侧**逐位一致**：按比例分配，不是固定步长。
+     *
+     * 旧版本这里也是 `step = ceil(roi_w/96)` 的固定步长，和 HLS 犯了
+     * **同一个错** —— 这正是缺陷藏了这么久的原因：csim 两边一起错。
+     * 参考实现的价值在于"独立复现"，一旦照抄被测量的实现就失去意义。
+     *
+     * 边界公式：bx[j] = roi_x + j*roi_w/96（整除）。
+     * 第 j 个输出块 = 源 [bx[j], bx[j+1]) × [by[i], by[i+1])。
+     * 相邻区间共用同一个整数表达式 → 无缝无叠，恒 96 个输出。 */
+    for (int i = 0; i < OW_H; i++) {
+        const int y0 = roi_y + (i * roi_h) / OW_H;
+        const int y1 = roi_y + ((i + 1) * roi_h) / OW_H;
 
-    for (int y = 0; y < height; y++) {
-        for (int x = 0; x < width; x++) {
-            const ap_uint<8> gray = rgb565_to_gray(src[y * width + x]);
+        for (int j = 0; j < OW; j++) {
+            const int x0 = roi_x + (j * roi_w) / OW;
+            const int x1 = roi_x + ((j + 1) * roi_w) / OW;
 
-            const bool in_roi = (x >= roi_x) && (x < roi_x + roi_w) &&
-                                (y >= roi_y) && (y < roi_y + roi_h);
-            if (!in_roi) continue;
-
-            acc = acc + (ap_uint<24>)gray;
-            cx++;
-            if (cx == step_x) {
-                cx = 0;
-                cy++;
-                if (cy == step_y) {
-                    cy = 0;
-                    const ap_uint<24> n = (ap_uint<24>)step_x * (ap_uint<24>)step_y;
-                    if (n_out < OPIX) dst[n_out++] = (ap_uint<8>)(acc / n);
-                    acc = 0;
+            ap_uint<24> acc = 0;
+            for (int y = y0; y < y1; y++) {
+                for (int x = x0; x < x1; x++) {
+                    acc = acc + (ap_uint<24>)rgb565_to_gray(src[y * width + x]);
                 }
             }
+            const ap_uint<24> n = (ap_uint<24>)((x1 - x0) * (y1 - y0));
+            /* ROI >= 96x96 由顶层参数检查保证，n 恒 > 0 */
+            dst[i * OW + j] = (ap_uint<8>)(acc / n);
         }
     }
-
-    while (n_out < OPIX) dst[n_out++] = 0;
 }
 
 /* ================================================================== *

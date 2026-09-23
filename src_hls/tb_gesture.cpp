@@ -291,6 +291,88 @@ static int compare(const char *name, int verbose)
     return bad;
 }
 
+/**
+ * @brief 找一个 ROI 尺寸，使**旧实现**（固定步长 ceil(r/96)）填不满 96
+ *
+ * ⚠ 判据不能只看「step 能整除 r」——还要看"少掉的那些输出块，
+ *   旧实现是否真的丢掉了内容"。旧实现每行吐 r/step 个输出，前提是
+ *   它消费的列数 (r/step)*step 覆盖整个 ROI。若 ROI 不能被 step 整除，
+ *   后面那些块的位置**本来就没有源像素**，新实现同样不应有内容 ——
+ *   拿它做回归用例会误报。
+ *
+ *   正确判据：step>=2 && r%step==0 && r/step < 96
+ *      r=320 → step=4 → 320/4=80 → 丢的是真内容 ✓（赛题真实配置）
+ *      r=98  → step=2 → 98/2=49 → 98%2==0 ✓，但 49*2=98 覆盖整个 ROI，
+ *             所以旧实现**并没有丢内容**，只是块更细 —— 不是缺陷
+ *
+ *   从 96 往上找最小可用尺寸，让用例在缩小规模的 cosim 里也可用。
+ *
+ * @return 可用尺寸；输入图放不下时返回 0（调用方跳过该用例）
+ */
+static int find_degenerate_roi(void)
+{
+    for (int r = 96; r <= IN_W && r <= IN_H; r++) {
+        const int step = (r + 95) / 96;
+        const int nout = r / step;
+        if (step >= 2 && r % step == 0 && nout < 96) return r;
+    }
+    return 0;
+}
+
+/**
+ * @brief 缩放覆盖率校验 —— 专抓"固定步长 + 补零"这类缺陷
+ *
+ * ⚠⚠ 这一组存在的理由：上面所有 compare() 用例都是**自比对**
+ *   （HLS vs C++ golden）。旧实现三份实现（HLS / C++ golden /
+ *   Python golden）**犯了同一个错**，自比对永远"通过"。
+ *   2026-09-22 上板对拍才发现输出右下角一大片恒为零。
+ *
+ * 判据：**没有"本该有内容、却是零"的格子**。
+ *   每个输出块 (i,j) 覆盖源矩形 ⟺ 其求和区非空；测试图刻意做成
+ *   处处非零（渐变 1..255 + 噪点）——所以非空区求和必 > 0，
+ *   故有源覆盖的块必须非零，否则就是没填上。
+ *
+ *   ⚠ 判据按 ROI 尺寸**自适应**，不能写死"整幅无零边框"：
+ *     ROI 98×98 时 96 个块只分到 98 列 → 每块宽 1~2 列，
+ *     非零列本来就只有 1 列（2 列宽的块平均一列亮一列暗，也不为零）。
+ *     写死会**误报**。这里只查"有源覆盖却为零"的格子，与尺寸无关。
+ *
+ *   用"恒零行/列"而不是"非零像素总数"：后者依赖图像内容，
+ *   前者只依赖几何，结论明确。
+ *
+ * @return 0 = 通过；否则返回失败计数（1）
+ */
+static int check_scale_coverage(const char *name, int roi_w, int roi_h)
+{
+    /* 块边界 —— 与 HLS / golden 同一公式，用来判断"该块有无源覆盖" */
+    const int N = GESTURE_OUT_SIZE;
+    int bad = 0;
+    int first_y = -1, first_x = -1;
+
+    for (int i = 0; i < N; i++) {
+        const int sy0 = (i * roi_h) / N, sy1 = ((i + 1) * roi_h) / N;
+        for (int j = 0; j < N; j++) {
+            const int sx0 = (j * roi_w) / N, sx1 = ((j + 1) * roi_w) / N;
+            const bool src_covers = (sx1 > sx0) && (sy1 > sy0);
+            if (!src_covers) continue;          /* 本就无源，不作要求 */
+            if (g_hls[i * N + j] == 0) {        /* 有源却是零 → 没填上 */
+                if (first_y < 0) { first_y = i; first_x = j; }
+                bad++;
+            }
+        }
+    }
+
+    if (bad == 0) {
+        printf("    [ OK ] %-38s %d 个有源块全部非零\n", name, GESTURE_OUT_SIZE * GESTURE_OUT_SIZE);
+        return 0;
+    }
+    printf("    [FAIL] %-38s %d 个块有源覆盖却是零！\n", name, bad);
+    printf("           首个: (y=%d, x=%d)   ROI %dx%d\n",
+           first_y, first_x, roi_w, roi_h);
+    printf("           → 块未填满，块覆盖与输出尺寸不匹配（旧固定步长缺陷）\n");
+    return 1;
+}
+
 /* ================================================================== *
  *  用例
  * ================================================================== */
@@ -432,8 +514,60 @@ int main(void)
         /* 宽度超上限 -> 应被拒绝 */
         gesture_preproc(s_in, s_out, GESTURE_MAX_WIDTH + 1, IN_H,
                         1, 0, 1, 1, 1, 256, 0, 0, 320, 320);
+        /* ROI 小于输出尺寸 -> 新实现按比例分配会除零，必须拒绝 */
+        gesture_preproc(s_in, s_out, IN_W, IN_H, 1, 0, 1, 1, 1, 256,
+                        0, 0, 32, 32);
 
         printf("    [ OK ] %-38s 未阻塞，正常返回\n", "非法参数拒绝");
+    }
+    printf("\n");
+
+    /* ---- 用例 6：缩放覆盖率绝对校验 ---- *
+     *
+     * ⚠⚠ 本用例针对 2026-09-22 上板发现的真实缺陷：
+     *   旧实现用固定步长 ceil(roi/96)，当该步长**整除** roi 时
+     *   （roi=320 → step=4 → 每行只吐 80 个），输出右下角一大片恒为零。
+     *   之所以此前所有用例都抓不到 —— 现有 compare() 全是**自比对**，
+     *   而三份实现（HLS / C++ golden / Python golden）用了同一套错误
+     *   逻辑，"一起错"于是永远显示通过。
+     *
+     *   这里换一个被测实现无法自我辩解的判据：**输出不得有空边框**
+     *   （见 check_scale_coverage，纯几何、与图像内容无关）。
+     */
+    printf("[6] 缩放覆盖率 —— 输出不得有空边框（回归：固定步长补零缺陷）\n");
+    make_test_image(6);
+    {
+        const int rx = 0, ry = 0, rw = IN_W, rh = IN_H;
+        run_hls(IN_W, IN_H, 0, 0, 0, 0, 0, 256, rx, ry, rw, rh);
+        check("coverage_full", check_scale_coverage("整图 ROI 覆盖率", rw, rh));
+    }
+
+    /* 再补一组指定尺寸的用例：优先找"步长整除"的退化尺寸，
+     * 找不到就退回赛题真实 ROI 320×320（只在 640x480 下放得下）。 */
+    {
+        int rw = find_degenerate_roi(), rh = rw;
+        if (rw > 0) {
+            const int rx = (IN_W - rw) / 2, ry = (IN_H - rh) / 2;
+            printf("       退化尺寸 %dx%d（ceil(%d/96)=%d 且整除 → 旧实现只填 %d）\n",
+                   rw, rh, rw, (rw + 95) / 96, rw / ((rw + 95) / 96));
+            run_hls(IN_W, IN_H, 0, 0, 0, 0, 0, 256, rx, ry, rw, rh);
+            check("coverage_degen", check_scale_coverage("退化尺寸覆盖率", rw, rh));
+        }
+
+        /* ⭐ 赛题/生产真实配置 320x320 —— 缺陷最初就是在它上面暴露的，
+         *   必须直接测，不能只靠上面那个"最小的退化尺寸"代跑。
+         *   320/96 = 3.33 → 旧步长 4 → 只填 80×80，缺 2816。 */
+        if (IN_W >= 320 && IN_H >= 320) {
+            const int rx = (IN_W - 320) / 2, ry = (IN_H - 320) / 2;
+            printf("       赛题配置 320x320（居中 @ %d,%d）\n", rx, ry);
+            run_hls(IN_W, IN_H, 0, 0, 0, 0, 0, 256, rx, ry, 320, 320);
+            check("coverage_320", check_scale_coverage("赛题 ROI 覆盖率", 320, 320));
+        }
+
+        if (rw == 0 && !(IN_W >= 320 && IN_H >= 320)) {
+            printf("    [跳过] 当前输入 %dx%d 放不下退化尺寸，也放不下 320x320\n",
+                   IN_W, IN_H);
+        }
     }
     printf("\n");
 

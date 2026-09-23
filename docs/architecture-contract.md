@@ -117,6 +117,23 @@
 | `0x20` | `THRESH` | 写 | 自适应阈值的手动偏置 |
 | `0x28` | `ROI_X` / `ROI_Y` | 写 | ROI 位置（调试用） |
 
+> ⚠ **ROI 尺寸下限：96×96**（2026-09-23 新增的硬约束）
+>
+> 缩放采用**按比例分配**：第 j 个输出覆盖源区间
+> `[roi_x + j*roi_w/96, roi_x + (j+1)*roi_w/96)`（整除）。
+> 隐含除数 `roi_w/96`、`roi_h/96` —— **ROI 小于 96×96 会除零**。
+>
+> 三处实现必须一致（已同步）：
+> `src_hls/gesture_preproc.cpp` 顶层参数检查 ·
+> `sw/preproc_driver.c` 的 `check_roi()` ·
+> `host/gesture_overlay.py` 的 `check_config()`。
+>
+> 违反时 PL 会**直接 return 不读 stream**（不产生输出，也不阻塞），
+> PS 侧则返回 `PREPROC_ERR_PARAM` —— 免得现象变成"跑完没输出"难以定位。
+>
+> 旧实现（固定步长 + 补零）允许更小的 ROI，但输出大部分恒为零，
+> 对 CNN 无意义，故有意收紧。
+
 **握手时序**：
 
 ```
@@ -271,14 +288,22 @@ PS 侧顺序（⚠ 不能反）：
 ```
 S2MM 必须先武装，否则预处理输出的第一拍没有接收方。
 
-**实测资源**（2026-09-15，xc7z020）：
+**实测资源**（xc7z020；**2026-09-23 更新** —— crop_scale 改为按比例分配后重测）：
 
-| 资源 | 用量 | 占比 |
-|---|---|---|
-| Slice LUTs | 12,735 | 23.94% |
-| Slice Registers | 15,736 | 14.79% |
-| Block RAM | 25.5 | 18.21% |
-| DSPs | 61 | 27.73% |
+| 资源 | 用量 | 占比 | 对比旧版 |
+|---|---|---|---|
+| Slice LUTs | 24,442 | 45.94% | ↑ 旧版 12,735 (23.94%) |
+| Slice Registers | 30,692 | 28.85% | ↑ 旧版 15,736 (14.79%) |
+| Block RAM | 25.5 | 18.21% | — 不变 |
+| DSPs | 61 | 27.73% | — 不变 |
+
+⚠ **LUT/FF 上涨全部来自 `crop_scale` 改成按比例分配**（约 +12.4k LUT）：
+新实现要 `acc[96]` 累加器数组，必须 `ARRAY_PARTITION complete` 才能
+保持主循环 II=1；不划分则退化成 II=2（LUT 回到 ~24%，但周期翻倍）。
+
+**取舍已定**：宁可吃 LUT 也要 II=1。理由是对当前用例（静态图喂 DDR）
+处理时间根本不是瓶颈，但余量留给后续扩展更值。若将来 PL 吃紧要加东西，
+回退方式就是去掉那条 `ARRAY_PARTITION`（详见 `gesture_preproc.cpp` 注释）。
 
 DSP 偏高**不在** `thresh_stage`（它只占 2 个）——实测大头在 `morph_stage`（56 个）。
 降 DSP 的尝试失败过（代价是 II 退化），详见 `src_hls/README.md`。
@@ -357,7 +382,8 @@ PL 做每像素一次操作的带宽型任务，PS 做需要循环迭代与权�
 | SCCB 主控 | ✅ 已写并验证（`rtl/sccb_master.v`，TB PASSED 10/10） |
 | HLS 预处理链 | ✅ 已综合（`gesture_preproc`，`user:hls:gesture_preproc:1.0`） |
 | 建工程→综合→实现→比特流→XSA | ✅ **2026-09-17 完整跑通**（0 error / 0 critical warning） |
-| 时序 | ✅ `All user specified timing constraints are met`，**WNS = +0.265 ns**、WHS = +0.051 ns（RTL 级）。⚠ 逐次波动大（+0.873 / +1.177 / +0.265）。⚠⚠ **且该 WNS 属于 AMD `v_tc` IP 内部，不是本设计的余量**（见 `report/design.md` §4.5）；本项目 HLS 流水线余量 **+43%**（csynth 估 143.31 MHz / 目标 100 MHz） |
+| 时序 | ✅ `All user specified timing constraints are met`，**WNS = +0.762 ns**、WHS = **+0.050 ns**（2026-09-23，crop_scale 修复后、未开 ILA）。⚠ 逐次波动大（历史：+0.873 / +1.177 / +0.265 / +0.762）。⚠⚠ **该 WNS 属于 AMD `v_tc` IP 内部，不是本设计的余量**（见 `report/design.md` §4.5）；本项目 HLS 流水线余量 **+43%**（csynth 估 143.31 MHz / 目标 100 MHz） |
+| ⚠ ILA | 调试探针（`bd_video.tcl` 的 `use_ila`）**必须置 0** 才能出正式比特流。开着它会让 BRAM 涨到 52.5%、并**引入一条 hold 违例（WHS −1.830 ns）** —— 违例路径是 XCLK(24MHz) → PS时钟(100MHz) 经 BUFG 进 ILA，两时钟相位本就不确定。实测关掉后 WHS 回到 +0.050 ✅ |
 | PS7 DDR 参数 | ✅ 已修正为 `MT41K256M16 RE-125` 并重跑验证 |
 | 摄像头选型 | ✅ **已定（2026-09-17）：PMOD-CAMERA v1.0，直插 Pmod A+B** |
 | **`ov5640_regs.v` 寄存器表** | ✅ **已替换为真表（250 条，正点原子来源，固化 640x480）**；✅ 2026-09-21 上板确认**事务发出去了**，但**无 ACK**（`sccb_0/cfg_error=1`）→ 问题在 XCLK 或接线，**不是表内容** |

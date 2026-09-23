@@ -142,6 +142,13 @@ int main(void)
     rc = preproc_config(&dev, 1, -8, 1, 1, 1, 256, 0, 0, 0, 320);
     check(rc == PREPROC_ERR_PARAM, "ROI 宽为 0 应被拦");
 
+    /* 3b'. ROI 小于输出尺寸 96 —— 按比例分配会除零，必须拦
+     *     （旧实现允许更小 ROI，但输出大部分恒为零，对 CNN 无意义） */
+    rc = preproc_config(&dev, 1, -8, 1, 1, 1, 256, 0, 0, 32, 32);
+    check(rc == PREPROC_ERR_PARAM, "ROI 小于 96x96 应被拦");
+    rc = preproc_config(&dev, 1, -8, 1, 1, 1, 256, 0, 0, 96, 95);
+    check(rc == PREPROC_ERR_PARAM, "ROI 高 95 (<96) 应被拦");
+
     /* 3c. 阈值偏置超范围（有符号 8 位） */
     rc = preproc_config(&dev, 1, 200, 1, 1, 1, 256, 160, 80, 320, 320);
     check(rc == PREPROC_ERR_PARAM, "阈值偏置 +200 超范围应被拦");

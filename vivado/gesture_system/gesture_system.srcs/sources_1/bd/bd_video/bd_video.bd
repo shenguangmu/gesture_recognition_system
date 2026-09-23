@@ -765,6 +765,18 @@
           "CLKOUT1_REQUESTED_OUT_FREQ": {
             "value": "24.000"
           },
+          "MMCM_CLKFBOUT_MULT_F": {
+            "value": "6.000"
+          },
+          "MMCM_CLKOUT0_DIVIDE_F": {
+            "value": "25.000"
+          },
+          "MMCM_DIVCLK_DIVIDE": {
+            "value": "1"
+          },
+          "OVERRIDE_MMCM": {
+            "value": "true"
+          },
           "PRIMITIVE": {
             "value": "MMCM"
           },
@@ -913,7 +925,7 @@
       },
       "gesture_preproc_0": {
         "vlnv": "user:hls:gesture_preproc:1.0",
-        "ip_revision": "2114791946",
+        "ip_revision": "2114798536",
         "xci_name": "bd_video_gesture_preproc_0_0",
         "xci_path": "ip\\bd_video_gesture_preproc_0_0\\bd_video_gesture_preproc_0_0.xci",
         "inst_hier_path": "gesture_preproc_0",

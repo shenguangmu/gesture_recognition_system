@@ -206,6 +206,15 @@ def check_config(thresh_mode, thresh_offset, gain,
     if roi_w <= 0 or roi_h <= 0:
         raise ValueError("ROI 宽高必须为正，收到 %dx%d" % (roi_w, roi_h))
 
+    # ⚠ ROI 必须 ≥ 96×96（= 输出尺寸 OUT_SIZE）。
+    #   缩放采用**按比例分配**，隐含除数 roi_w/96、roi_h/96 ——
+    #   ROI 小于输出尺寸会除零。PL 顶层 gesture_preproc 与
+    #   sw/preproc_driver.c 的 check_roi 都已加这条，三处必须一致。
+    #   （旧实现是固定步长 + 补零，允许更小 ROI，但输出大部分恒为零。）
+    if roi_w < OUT_SIZE or roi_h < OUT_SIZE:
+        raise ValueError("ROI 必须至少 %dx%d（按比例分配隐含除数 roi_w/%d），"
+                         "收到 %dx%d" % (OUT_SIZE, OUT_SIZE, OUT_SIZE, roi_w, roi_h))
+
     if roi_x is None: roi_x = (IN_WIDTH  - roi_w) // 2
     if roi_y is None: roi_y = (IN_HEIGHT - roi_h) // 2
 

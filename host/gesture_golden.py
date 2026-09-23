@@ -75,34 +75,48 @@ def crop_scale(rgb: np.ndarray, width: int, height: int,
                roi_x: int, roi_y: int, roi_w: int, roi_h: int) -> np.ndarray:
     """ROI 裁剪 + 盒式缩放，输出恒为 96x96。
 
-    整数加法是精确且可交换的，所以块内求和的顺序不影响结果 ——
+    ⚠⚠ 三个实现（HLS / gesture_ref.cpp / 本文件）必须**逐位一致**。
+      历史上这里也是 `step = ceil(roi_w/96)` 的固定步长，三份一起错，
+      所以自比对永远通不过也永远发现不了（见下方 by 注释）。
+
+    缩放语义：**按比例分配**。第 j 个输出列覆盖源列区间
+        [roi_x + j*roi_w/96, roi_x + (j+1)*roi_w/96)   （整除）
+    相邻区间共用同一个整数表达式 → 无缝无叠，恒好 96 个输出，
+    且完整覆盖 ROI。旧实现用固定步长 ceil(roi_w/96)，roi_w=320 时
+    step=4 能整除，整行只出 80 个输出，右下角 16 列恒为零。
+
+    整数加法精确可交换，所以块内求和顺序不影响结果 ——
     但**整数除法必须在求和之后**（不是每步平均），否则与 HLS 不一致。
     """
-    step_x = max(1, (roi_w + OUT_SIZE - 1) // OUT_SIZE)
-    step_y = max(1, (roi_h + OUT_SIZE - 1) // OUT_SIZE)
+    if roi_w < OUT_SIZE or roi_h < OUT_SIZE:
+        raise ValueError(
+            f"ROI 必须至少 {OUT_SIZE}x{OUT_SIZE}（按比例分配隐含"
+            f"除数 roi_w/{OUT_SIZE}），当前 {roi_w}x{roi_h}")
 
     gray = rgb565_to_gray(rgb).reshape(height, width)
+    roi = gray[roi_y:roi_y + roi_h, roi_x:roi_x + roi_w].astype(np.uint64)
 
-    # 裁出 ROI
-    roi = gray[roi_y:roi_y + roi_h, roi_x:roi_x + roi_w]
+    # 块边界（与 HLS/gesture_ref.cpp 同一公式）
+    xs = (np.arange(OUT_SIZE + 1) * roi_w) // OUT_SIZE
+    ys = (np.arange(OUT_SIZE + 1) * roi_h) // OUT_SIZE
 
-    # 右侧/下侧补零，使尺寸凑成 step 的整数倍
-    ph = (-roi_h) % step_y
-    pw = (-roi_w) % step_x
-    if ph or pw:
-        roi = np.pad(roi, ((0, ph), (0, pw)), mode='constant')
+    # 同一输出块内的行/列宽度可能差 1（余数已分给靠前的块），
+    # 所以不能用 reshape —— 用累加和（cumsum）取任意矩形块之和。
+    csum = np.cumsum(np.cumsum(roi, axis=0, dtype=np.uint64),
+                     axis=1, dtype=np.uint64)
+    csum = np.pad(csum, ((1, 0), (1, 0)))       # 前置零行/列，便于取块
 
-    # 盒式平均：reshape 成块，求和后整除
-    bh = roi.shape[0] // step_y
-    bw = roi.shape[1] // step_x
-    blocks = roi[:bh * step_y, :bw * step_x].reshape(bh, step_y, bw, step_x)
-    avg = blocks.sum(axis=(1, 3), dtype=np.uint64) // (step_x * step_y)
+    # rect[i,j] = ROI 内矩形 [ys[i]:ys[i+1], xs[j]:xs[j+1]] 的像素和。
+    # ⚠ 减法顺序：先横向（同行累加和相减，非负），再纵向 —— 中间量
+    #   恒非负，不会触发 uint64 借位下溢的 RuntimeWarning。
+    #   写成 csum[y1,x1]-csum[y0,x1]-csum[y1,x0]+csum[y0,x0] 虽然
+    #   模运算下结果相同，但会产生溢出警告。
+    rect = (csum[np.ix_(ys[1:], xs[1:])] - csum[np.ix_(ys[:-1], xs[1:])]
+            - csum[np.ix_(ys[1:], xs[:-1])] + csum[np.ix_(ys[:-1], xs[:-1])])
 
-    out = np.zeros((OUT_SIZE, OUT_SIZE), dtype=np.uint8)
-    copy_h = min(bh, OUT_SIZE)
-    copy_w = min(bw, OUT_SIZE)
-    out[:copy_h, :copy_w] = avg[:copy_h, :copy_w].astype(np.uint8)
-    return out
+    # 每块像素数（外积，恒 > 0 —— 上面已挡 ROI < 96）
+    n = np.outer(np.diff(ys), np.diff(xs))
+    return (rect // n).astype(np.uint8)
 
 
 # ======================================================================

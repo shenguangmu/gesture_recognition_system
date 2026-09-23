@@ -134,10 +134,17 @@ static int check_dma_args(const void *src, void *dst)
     return PREPROC_OK;
 }
 
-/** ROI 是否落在图像内 */
+/** ROI 是否落合法（含尺寸下限）
+ *
+ * ⚠ ROI 必须**至少 96×96**（= 输出尺寸）。
+ *   缩放采用按比例分配，隐含除数 roi_w/96、roi_h/96 ——
+ *   ROI 小于输出尺寸会**除零**。PL 侧 gesture_preproc 也会拒绝，
+ *   这里同步拦住，免得发过去的配置被静默丢弃、现象变成"跑完没输出"。
+ *   旧实现（固定步长 + 补零）允许更小的 ROI，但那样输出大部分恒为零，
+ *   对 CNN 无意义 —— 这条下限是新契约的有意收紧。 */
 static int check_roi(const preproc_t *dev)
 {
-    if (dev->roi_w <= 0 || dev->roi_h <= 0) return 0;
+    if (dev->roi_w < PREPROC_OUT_SIZE || dev->roi_h < PREPROC_OUT_SIZE) return 0;
     if (dev->roi_x < 0 || dev->roi_y < 0) return 0;
     if (dev->roi_x + dev->roi_w > dev->width) return 0;
     if (dev->roi_y + dev->roi_h > dev->height) return 0;

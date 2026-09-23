@@ -176,14 +176,35 @@ inline void emit(ix_t &o, ap_uint<8> v, bool last)
  * 输出长度恒为 GESTURE_OUT_PIXELS，与输入分辨率无关；
  * 这是与 CNN 侧的契约，见 docs/架构与接口契约.md §3.1。
  *
- * @param step_x  横向块宽（每多少个源像素出一个输出像素）
- * @param step_y  纵向块高
+ * ⭐ 缩放采用**按比例分配**，不是固定步长 —— 见下方注释。
  */
+/**
+ * @brief 结算一个输出行：acc[] 求平均写进 ox[i*96 ..]，并把 acc 清零
+ *
+ * 块内像素数 = 块宽(bx[j+1]-bx[j]) × 块高(by[i+1]-by[i])，恒 > 0
+ * （ROI ≥ 96×96 由顶层参数检查保证）。
+ *
+ * 两处调用点：正常"跨到下一行"结算 + **ROI 末尾收尾**
+ * （最后一行恰好是 ROI 末行时，不会跨到下一行，必须补一次）。
+ */
+static void cs_flush_row(ap_uint<8> *ox, ap_uint<24> *acc,
+                         const ap_uint<16> *bx, const ap_uint<16> *by,
+                         int i)
+{
+#pragma HLS INLINE
+    const ap_uint<16> hh = (ap_uint<16>)(by[i + 1] - by[i]);
+    for (int j = 0; j < G::OW; j++) {
+#pragma HLS PIPELINE II=1
+        const ap_uint<16> wv = (ap_uint<16>)(bx[j + 1] - bx[j]);
+        ox[i * G::OW + j] = (ap_uint<8>)(acc[j] / (ap_uint<24>)(wv * hh));
+        acc[j] = 0;
+    }
+}
+
 static void crop_scale(hls::stream<axis_rgb_t> &src,
                        hls::stream<ix_t>       &dst,
                        int width, int height,
-                       int roi_x, int roi_y, int roi_w, int roi_h,
-                       int step_x, int step_y)
+                       int roi_x, int roi_y, int roi_w, int roi_h)
 {
 #pragma HLS INLINE off
 
@@ -192,13 +213,70 @@ static void crop_scale(hls::stream<axis_rgb_t> &src,
     static ap_uint<8> ox[G::OW * G::OH];
 #pragma HLS BIND_STORAGE variable=ox type=RAM_2P impl=BRAM
 
-    ap_uint<24> acc = 0;
-    ap_uint<8>  cx  = 0;
-    ap_uint<8>  cy  = 0;
-    int         n_out = 0;
+    /* ---- 输出像素 ⇔ 源区间 的边界（按比例分配） ----
+     *
+     * ⚠⚠ 这里曾经用**固定步长** `step = ceil(roi_w/96)`，是个真 bug：
+     *   roi_w=320 时 step_x = (320+95)/96 = 4（**整除**），循环每攒 4 列
+     *   才吐一个输出 → 整行只吐 320/4 = **80** 个，而 OW=96 →
+     *   只填了 80×80=6400，剩 2816 个走补零路径。
+     *   症状是输出右下角一大片恒为零的"空边框"。
+     *   ⚠ 致命之处在于**它不报错**，且 csim 的 golden 用了同一套错误
+     *     逻辑（gesture_ref.cpp 同款），两边一起错 → 测不出来。
+     *
+     * 改法：第 j 个输出覆盖源区间 [j*roi_w/96, (j+1)*roi_w/96)。
+     * 相邻区间的边界由**同一个整除表达式**产生，必然首尾相接、无缝隙
+     * 无重叠；区间长度只能是 ceil(roi_w/96) 或 floor(roi_w/96)
+     * （余数恰好分完），所以**恒好 96 个输出，且覆盖整个 ROI**。
+     *
+     * 两个前提由顶层参数检查保证（见 gesture_preproc）：
+     *   roi_w >= G::OW && roi_h >= G::OH → 除法非零
+     *   roi_x + roi_w <= width          → 索引定界，bx 必落在 [0,width]
+     */
+    ap_uint<16> bx[G::OW + 1];
+    ap_uint<16> by[G::OH + 1];
+#pragma HLS ARRAY_PARTITION variable=bx complete
+#pragma HLS ARRAY_PARTITION variable=by complete
+    for (int j = 0; j <= G::OW; j++)
+#pragma HLS PIPELINE II=1
+        bx[j] = (ap_uint<16>)(roi_x + (j * roi_w) / G::OW);
+    for (int j = 0; j <= G::OH; j++)
+#pragma HLS PIPELINE II=1
+        by[j] = (ap_uint<16>)(roi_y + (j * roi_h) / G::OH);
+
+
+    /* 当前输出块的累加器（按输出列缓冲，收满一个输出行的源行后求平均）
+     *
+     * ⚠ 必须 ARRAY_PARTITION complete。只用 BIND_STORAGE=RAM_2P 时，
+     *   acc[j] 是**读-改-写**且 j 解析不出常量 → HLS 当单块 RAM →
+     *   访存依赖 → 主循环 II=2（实测 4,308,939 周期）。
+     *   划分后 II=1（2,236,419 周期），代价是 FF/LUT 上升。
+     *
+     *   还试过"4 路分流的 8/16 位计数器"想省资源：索引公式
+     *   (j%4)*4+(j>>2) 会把 96 个 j 挤进 36 个槽，**语义就是错的**。
+     *   别再走这条路。 */
+    ap_uint<24> acc[G::OW];
+#pragma HLS ARRAY_PARTITION variable=acc complete
+
+    for (int j = 0; j < G::OW; j++) {
+#pragma HLS UNROLL
+        acc[j] = 0;
+    }
+
+    /* ⚠ 这两个**不是** static —— 每帧调用都重新初始化，否则第二帧起会错。
+     *   （同一段里 ox[] 是 static，那是有意的：每次全覆写，不需要清零。） */
+    ap_uint<16> out_row = 0;   /* 当前正在填充的输出行 */
+    ap_uint<8>  rows_in = 0;   /* 该输出行已接收的源行数 */
 
     for (int y = 0; y < height; y++) {
 #pragma HLS LOOP_TRIPCOUNT min=480 max=1080
+
+        /* ⚠⚠ ROI **之外**的行不贡献任何像素，绝不能推进输出行计数。
+         *   漏了这一句就是真 bug：roi_y>0 时，前 roi_y 行会假触发结算
+         *   （块高为 1 时每行都触发），把 ox 前面若干行写成零、out_row
+         *   冲过 96 → 越界写。
+         *   症状：极小 ROI（roi_y=192, 96×96）用例出现 372 个像素的
+         *   边缘性错位 —— 正是这条漏了。 */
+        if (!(y >= roi_y && y < roi_y + roi_h)) continue;
 
         for (int x = 0; x < width; x++) {
 #pragma HLS LOOP_TRIPCOUNT min=640 max=1920
@@ -221,31 +299,45 @@ static void crop_scale(hls::stream<axis_rgb_t> &src,
                           (y >= roi_y) && (y < roi_y + roi_h);
 
             if (in_roi) {
-                acc = acc + (ap_uint<24>)gray;
-                cx  = cx + 1;
-
-                if (cx == step_x) {
-                    cx = 0;
-                    cy = cy + 1;
-
-                    if (cy == step_y) {
-                        cy = 0;
-                        const ap_uint<24> n =
-                            (ap_uint<24>)step_x * (ap_uint<24>)step_y;
-                        if (n_out < G::OPIX)
-                            ox[n_out++] = (ap_uint<8>)(acc / n);
-                        acc = 0;
-                    }
+                /* 该列落在第几个输出块？
+                 *
+                 * ⚠ 这里必须是**全展开的 96 项扫描**，别"优化"成增量比较。
+                 *   实测对比（csynth）：
+                 *     96 项扫描(k 为常量)  → bx 是 97 个寄存器 + 直接连线
+                 *                              crop_scale LUT ~13k
+                 *     增量 x>=bx[j+1]      → bx[j+1] 变成**纯变量索引查找**，
+                 *                              HLS 撑出 130k LUT / 297 DSP
+                 *   关键区别是 k 是否为编译期常量：常量 → 连线；
+                 *   变量 → 97 选 1 译码器 ×97 个消费点。
+                 *   多出来的 96 个比较器很便宜（AND 项），译码器才是灾难。 */
+                ap_uint<8> j = 0;
+                for (int k = 0; k < G::OW; k++) {
+#pragma HLS UNROLL
+                    if (x >= bx[k]) j = (ap_uint<8>)k;
                 }
+                acc[j] = acc[j] + (ap_uint<24>)gray;
             }
+        }
+
+        /* ---- 行尾：本行若跨到下一个输出行，结算上一块 ---- */
+        rows_in = rows_in + 1;
+
+        if (rows_in == (ap_uint<8>)(by[out_row + 1] - by[out_row])) {
+            cs_flush_row(ox, acc, bx, by, (int)out_row);
+            rows_in  = 0;
+            out_row = out_row + 1;
         }
     }
 
-    /* 若 ROI 尺寸不是 96 的整数倍，块覆盖会少一部分，补零到定长 */
-    while (n_out < G::OPIX) ox[n_out++] = 0;
+    /* ---- 末尾收尾 ----
+     * ROI 最后一行若恰好是某个输出行的末行，循环里"跨到下一行"的条件
+     * 不会触发（by[96] 之后没有下一行了），必须在这里补一次结算。
+     * 只有 ROI 底边 = 图像底边时才会用到（此时 out_row 停在第 95 行）。 */
+    if (rows_in != 0) {
+        cs_flush_row(ox, acc, bx, by, (int)out_row);
+    }
 
     /* ---- 按普通 96x96 行优先顺序吐出 ----
-     * ⚠ 这里**不要**预补零边框。
      *
      * 曾经试过在流里预先补一圈零（顶部 1 行、左侧 2 列），想让下游
      * 的 3x3 阶段直接读到零。那是错的：下游阶段自己已经做 zero-feed
@@ -695,8 +787,7 @@ static void preproc_pipeline(hls::stream<axis_rgb_t>  &src,
                              int thresh_mode, int thresh_offset,
                              int gauss_en, int sobel_en, int morph_en,
                              int gain,
-                             int roi_x, int roi_y, int roi_w, int roi_h,
-                             int step_x, int step_y)
+                             int roi_x, int roi_y, int roi_w, int roi_h)
 {
 #pragma HLS INLINE off
 
@@ -719,8 +810,7 @@ static void preproc_pipeline(hls::stream<axis_rgb_t>  &src,
 
 #pragma HLS DATAFLOW
 
-    crop_scale(src, s0, width, height,
-               roi_x, roi_y, roi_w, roi_h, step_x, step_y);
+    crop_scale(src, s0, width, height, roi_x, roi_y, roi_w, roi_h);
 
     gaussian_stage(s0, s1, G::OW, G::OH, gauss_en);
 
@@ -778,14 +868,14 @@ void gesture_preproc(hls::stream<axis_rgb_t>  &src,
         width > GESTURE_MAX_WIDTH || height > GESTURE_MAX_HEIGHT) {
         return;
     }
+    /* ---- ROI 合法性 ----
+     * ⚠ ROI 必须**至少 96×96**。旧实现（固定步长 + 补零）允许更小的
+     *   ROI，但结果是大部分输出恒为零，对 CNN 毫无意义；新实现按比例
+     *   分配，隐含除数 roi_w/96、roi_h/96 —— ROI 小于 96 会除零。
+     *   宁可在这里直接拒绝，也不要上板之后产出难以解释的输出。 */
     if (roi_w <= 0 || roi_h <= 0 || roi_x < 0 || roi_y < 0) return;
     if (roi_x + roi_w > width || roi_y + roi_h > height) return;
-
-    /* ---- 缩放步长：向上取整 ---- */
-    int step_x = (roi_w + G::OW - 1) / G::OW;
-    int step_y = (roi_h + G::OH - 1) / G::OH;
-    if (step_x < 1) step_x = 1;
-    if (step_y < 1) step_y = 1;
+    if (roi_w < G::OW || roi_h < G::OH) return;
 
     /* ⚠ 这里**不能**直接展开 DATAFLOW —— 那会让 AXI-Lite 的参数
      *   落进 DATAFLOW 区域，触发 [HLS 200-616] 的仿真死锁。
@@ -793,7 +883,6 @@ void gesture_preproc(hls::stream<axis_rgb_t>  &src,
     preproc_pipeline(src, dst, width, height,
                      thresh_mode, thresh_offset,
                      gauss_en, sobel_en, morph_en,
-                     gain, roi_x, roi_y, roi_w, roi_h,
-                     step_x, step_y);
+                     gain, roi_x, roi_y, roi_w, roi_h);
 }
 

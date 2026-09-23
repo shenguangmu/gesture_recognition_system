@@ -4,7 +4,7 @@
     "xci_name": "bd_video_gesture_preproc_0_0",
     "cell_name": "gesture_preproc_0",
     "component_reference": "user:hls:gesture_preproc:1.0",
-    "ip_revision": "2114791946",
+    "ip_revision": "2114798536",
     "gen_directory": "../../../../../../gesture_system.gen/sources_1/bd/bd_video/ip/bd_video_gesture_preproc_0_0",
     "parameters": {
       "component_parameters": {
@@ -12,8 +12,8 @@
         "clk_period": [ { "value": "10", "enabled": false, "usage": "all" } ],
         "machine": [ { "value": "64", "enabled": false, "usage": "all" } ],
         "combinational": [ { "value": "0", "enabled": false, "usage": "all" } ],
-        "latency": [ { "value": "undef", "enabled": false, "usage": "all" } ],
-        "II": [ { "value": "undef", "enabled": false, "usage": "all" } ]
+        "latency": [ { "value": "1", "enabled": false, "usage": "all" } ],
+        "II": [ { "value": "2 ~ 2236419", "enabled": false, "usage": "all" } ]
       },
       "model_parameters": {
         "C_S_AXI_CONTROL_ADDR_WIDTH": [ { "value": "7", "resolve_type": "generated", "format": "long", "usage": "all" } ],
@@ -34,7 +34,7 @@
       },
       "runtime_parameters": {
         "IPCONTEXT": [ { "value": "IP_Integrator" } ],
-        "IPREVISION": [ { "value": "2114791946" } ],
+        "IPREVISION": [ { "value": "2114798536" } ],
         "MANAGED": [ { "value": "TRUE" } ],
         "OUTPUTDIR": [ { "value": "../../../../../../gesture_system.gen/sources_1/bd/bd_video/ip/bd_video_gesture_preproc_0_0" } ],
         "SELECTEDSIMMODEL": [ { "value": "" } ],
@@ -590,5 +590,5 @@
       }
     }
   },
-  "checksum": "e19fdc41"
+  "checksum": "c5df21a7"
 }
