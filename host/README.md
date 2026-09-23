@@ -57,6 +57,7 @@ python capture_frame.py --camera 0 --out frame.bin
 | `dump_frame.py` | **PC + 板** | 帧数据的转储、比对、出图 |
 | `gesture_overlay.py` | **板（PYNQ）** | 加载 overlay、驱动整条流水线 |
 | `usb_camera_run.py` | **板（PYNQ）** | USB(UVC) 摄像头 → PL 链（绕开 DVP 硬件） |
+| `run.py` | **板（PYNQ）** | **日常一键入口**：`%run run.py`，交互选输入 → 跑一帧 → 出图 |
 | `pynq_serial.py` | **PC** | 串口控制台，从启动日志里抠板卡 IP |
 | `bringup_check.py` | **板（PYNQ）** | 分步验证（DDR / 预处理链）—— **②③ 的入口** |
 
