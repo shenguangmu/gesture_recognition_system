@@ -61,7 +61,7 @@ gray = np.fromfile('golden_96x96_gray.bin',     dtype=np.uint8).reshape(96, 96)
 >
 > 想对比两种模式，用 `--no-thresh` 生成灰度版：
 > ```bash
-> python host/gesture_golden.py --input frame.bin --roi 160 80 320 320 >        --no-thresh --out golden_gray.bin
+> python host/gesture_golden.py --input frame.bin --roi 160 80 320 320 --no-thresh --out golden_gray.bin
 > ```
 
 ## 自己造新样本
