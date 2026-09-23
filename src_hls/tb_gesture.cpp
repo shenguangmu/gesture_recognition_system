@@ -65,6 +65,7 @@
 static ap_uint<16> g_src[IN_W * IN_H];
 static ap_uint<8>  g_hls[GESTURE_OUT_PIXELS];
 static ap_uint<8>  g_ref[GESTURE_OUT_PIXELS];
+static int          g_in_leftover = 0;   /* run_hls 结束时输入流剩余元素数 */
 
 /** 确定性伪随机（线性同余）—— 不用 rand()，保证任何平台结果一致 */
 static unsigned int g_seed = 12345u;
@@ -113,7 +114,21 @@ static void make_test_image(int variant)
             const int py1 = (IN_H - PH) / 2, py2 = py1 + PH;
 
             if (x >= px1 && x < px2 && y >= py1 && y < py2) {
-                r = 220; g = 200; b = 180;
+                /* ⚠⚠ 掌区必须**随 y 变化**，否则这一大片是"行常量"，
+                 *   整条链对 roi_y 退化 —— 平移 ROI 在 y 方向不改变输出，
+                 *   于是**任何依赖 roi_y 的缺陷都测不出来**。
+                 *
+                 *   2026-09-23 实测教训：上板发现 roi_y 改了 80→160
+                 *   输出逐字节不变，想在 csim 复现却复现不了 ——
+                 *   因为用例 3 的 ROI(272,192,96,96) 整个落在行常量的
+                 *   掌区里，roi_y 本就该无影响。
+                 *
+                 *   背景那部分有 lcg() 噪点、天然随 y 变；缺的就是掌区。 */
+                const ap_uint<8> yv = (ap_uint<8>)
+                    (((y - py1) * 90) / ((PH > 1) ? PH : 1));
+                r = (ap_uint<8>)(220 - yv / 2);
+                g = (ap_uint<8>)(200 - yv / 3);
+                b = (ap_uint<8>)(180 - yv / 4);
 
                 /* 指缝：掌区内几条暗竖条 */
                 const int lx = (x - px1) % 64;
@@ -208,6 +223,11 @@ static void run_hls(int width, int height,
                     gain, roi_x, roi_y, roi_w, roi_h);
 
     drain_output(s_out);
+
+    /* ⚠ 输入流必须被**读空** —— 这是"跳过的行没读流"这类缺陷在
+     *   csim 里**唯一可见的信号**（输出比对看不见它，见用例 7 注释）。
+     *   hls::stream 在 C 仿真模型里提供 size()。 */
+    g_in_leftover = (int)s_in.size();
 }
 
 static void run_ref(int width, int height,
@@ -567,6 +587,59 @@ int main(void)
         if (rw == 0 && !(IN_W >= 320 && IN_H >= 320)) {
             printf("    [跳过] 当前输入 %dx%d 放不下退化尺寸，也放不下 320x320\n",
                    IN_W, IN_H);
+        }
+    }
+    printf("\n");
+
+    /* ---- 用例 7：ROI **四边都不贴边** —— 专抓"跳过行不读流"缺陷 ----
+     *
+     * ⚠⚠ 2026-09-23 上板查出的真 bug（详见 crop_scale 里的注释）：
+     *   原实现把 ROI 之外的行 `continue` 跳过时，**一个像素都没从
+     *   输入流里读走** → 硬件把帧的前 roi_y 行当成了 ROI 首行 →
+     *   **roi_y 完全失效**。
+     *
+     *   板上实测：配 roi_y=80 与 roi_y=160 输出**逐字节相同**，
+     *   且都等于 golden(roi_y=0)。
+     *
+     *   ⚠ 为什么现有用例全都没抓到：用例 1/2/3/6 的 ROI 要么贴左边
+     *     (roi_x=0) 要么贴顶边 (roi_y=0)，**总能碰上 `in_roi` 成立的行**，
+     *     读取路径始终被执行。只有 ROI **四边都不贴边**时，
+     *     "整行被跳过且不读流"才会暴露。
+     *
+     *   ⚠ 判据不能用"输出内容" —— 实测**抓不到**：
+     *     C++ 里 `continue` 只是"少读"，ROI 行读到的仍是正确数据，
+     *     所以 C++ 输出不变，自比对永远通过。（回退修复验证过：仍 PASS）
+     *
+     *   可靠信号是 **"输入流有没有被读空"** —— 跳过的行没读流，
+     *   流里就会剩下数据。`hls::stream` 在 C 仿真模型里有 `size()`。
+     *   实测：修复前 `s_in` 剩余 >0，修复后 =0。
+     *
+     *   （板上之所以表现为"roi_y 失效"，是因为真实硬件里上游 AXI-Stream
+     *     不会等你 —— 少读的行直接导致整帧前移。C++ 模型无限深、不反压，
+     *     所以只体现为"剩数据"。）
+     */
+    printf("[7] ROI 四边不贴边 —— 跳过的行也必须读空流\n");
+    {
+        const int mw = (IN_W < 96) ? IN_W : 96;
+        const int mh = (IN_H < 96) ? IN_H : 96;
+        const int rx = (IN_W - mw) / 3;      /* >0：左边有余量 */
+        const int ry = (IN_H - mh) / 3;      /* >0：上边有余量 */
+
+        if (rx > 0 || ry > 0) {
+            make_test_image(6);
+            run_hls(IN_W, IN_H, 0, 0, 0, 0, 0, 256, rx, ry, mw, mh);
+            printf("       ROI=(%d,%d) %dx%d  输入流剩余 %d 个像素\n",
+                   rx, ry, mw, mh, g_in_leftover);
+            check("stream_drained", g_in_leftover);
+            if (g_in_leftover == 0)
+                printf("    [ OK ] %-38s 输入流已读空\n", "跳过的行也读流");
+            else
+                printf("    [FAIL] %-38s 输入流还剩 %d 个像素！\n"
+                       "           → ROI 之外的行没读流，硬件会让整帧前移\n"
+                       "           → 这正是 2026-09-23 上板查到的 roi_y 失效\n",
+                       "跳过的行也读流", g_in_leftover);
+        } else {
+            printf("    [跳过] 输入太小，ROI 挪不出余量\n");
         }
     }
     printf("\n");

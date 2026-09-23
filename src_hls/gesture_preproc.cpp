@@ -270,13 +270,40 @@ static void crop_scale(hls::stream<axis_rgb_t> &src,
     for (int y = 0; y < height; y++) {
 #pragma HLS LOOP_TRIPCOUNT min=480 max=1080
 
-        /* ⚠⚠ ROI **之外**的行不贡献任何像素，绝不能推进输出行计数。
-         *   漏了这一句就是真 bug：roi_y>0 时，前 roi_y 行会假触发结算
-         *   （块高为 1 时每行都触发），把 ox 前面若干行写成零、out_row
-         *   冲过 96 → 越界写。
-         *   症状：极小 ROI（roi_y=192, 96×96）用例出现 372 个像素的
-         *   边缘性错位 —— 正是这条漏了。 */
-        if (!(y >= roi_y && y < roi_y + roi_h)) continue;
+        /* ---- ROI 之外的行：**仍必须把这一行读空并丢弃** ----
+         *
+         * ⚠⚠ 这里曾经直接 `continue` 跳过，是真 bug（2026-09-23 上板查出）：
+         *
+         *   原来写成：
+         *       if (!(y >= roi_y && y < roi_y + roi_h)) continue;
+         *       for (x...) { w_in = src.read(); ... }
+         *
+         *   跳过的行**一个像素都没从流里读走** → 输入流没被消费。
+         *   后果：硬件把**帧的前 roi_y 行**当成了 ROI 的第一行。
+         *   实测证据（板上输出反推）：
+         *       配 roi_y=80  →  行为 == golden(roi_y=0)   100%
+         *       配 roi_y=160 →  与 roi_y=80 输出**逐字节相同**
+         *       配 roi_x 变化 → 输出正常变化（x 循环不跳过，故无此问题）
+         *   → **roi_y 完全失效**，且任何 roi_y>0 的配置都错。
+         *
+         *   ⚠ 为什么 csim / cosim 都没抓到：`gesture_ref.cpp` 是软件数组
+         *     遍历，`continue` 只跳过数组元素、没有"流"的概念 ——
+         *     两边在**同一个错误的输入窗口**下算出一致结果。
+         *     （又是"多份实现一起错"这个模式，见 docs/board-test-log-2026-09-23.md）
+         *
+         *   修法：读空这一行再跳过。这样**每个源行恰好消费 width 个像素**，
+         *   流的位置与 y 始终保持同步。ROI 以外的像素读出来直接丢掉。
+         *
+         *   ⚠ 不要改成"不读"或"读一半"—— 上游是 AXI-Stream，
+         *     少读一个像素都会让**后面全部错位**，且不报任何错。 */
+        if (!(y >= roi_y && y < roi_y + roi_h)) {
+            for (int x = 0; x < width; x++) {
+#pragma HLS LOOP_TRIPCOUNT min=640 max=1920
+#pragma HLS PIPELINE II=1
+                (void)src.read();
+            }
+            continue;
+        }
 
         for (int x = 0; x < width; x++) {
 #pragma HLS LOOP_TRIPCOUNT min=640 max=1920
