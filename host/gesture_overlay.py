@@ -708,7 +708,11 @@ class GesturePipeline(object):
         import matplotlib.pyplot as plt
         plt.figure(figsize=(4, 4))
         plt.imshow(img, cmap='gray', vmin=0, vmax=255)
-        plt.title("96x96 预处理输出")
+        # ⚠ 标题用**英文** —— 板上 matplotlib 没有中文字体。
+        #   写中文的后果不是报错，而是刷一串
+        #       UserWarning: Glyph 39044 (...) missing from current font
+        #   并且标题渲染成豆腐块 —— 看起来像"图没出来"，其实是字体的锅。
+        plt.title("96x96 preprocessing output")
         plt.axis('off')
         plt.show()
         return img

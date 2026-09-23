@@ -177,20 +177,51 @@ def to_rgb565_from_camera(index):
 
 
 def pick_input():
-    """列出手边可用的输入，让用户选。返回 (rgb565, 描述)。"""
+    """列出手边可用的输入，让用户选。返回 (rgb565, 描述)。
+
+    ⚠⚠ **只列"输入尺寸"的 .bin（614400 字节）**。
+
+      /home/xilinx/ 下同时躺着两类 .bin：
+        · 输入帧  640×480 RGB565 = **614400 字节**
+        · 输出结果 96×96  灰度  = **9216 字节**
+      两者后缀一样，**光看名字分不出来**。
+      不过滤的话，随手选中一个 9216 的"输出"当输入，
+      会以 "字节数不对" 结束 —— 这不是用户能预料的错。
+
+      （2026-09-23 实测踩到：菜单第 1 项是 hw_synth.bin，一个 9KB 的输出。）
+    """
     hr("选择输入")
 
-    bins = list_dir(HOME, ('.bin',))
+    all_bins = list_dir(HOME, ('.bin',))
+    inputs  = [p for p in all_bins if os.path.getsize(p) == IN_BYTES]
+    outputs = [p for p in all_bins if os.path.getsize(p) == OUT_SIZE * OUT_SIZE]
+    others  = [p for p in all_bins
+               if os.path.getsize(p) not in (IN_BYTES, OUT_SIZE * OUT_SIZE)]
     imgs = list_dir(HOME, ('.jpg', '.jpeg', '.png', '.bmp', '.webp'))
 
     opts = []
-    for p in bins[:6]:
-        opts.append(('bin', p, "%s  (%.0f KB)" % (os.path.basename(p),
-                                                  os.path.getsize(p) / 1024)))
+    for p in inputs[:8]:
+        opts.append(('bin', p, "输入帧  %s  (614400 B)"
+                     % os.path.basename(p)))
     for p in imgs[:6]:
-        opts.append(('img', p, "%s  (图片)" % os.path.basename(p)))
+        opts.append(('img', p, "图片    %s  (自动缩放)"
+                     % os.path.basename(p)))
     opts.append(('cam', 0, "USB 摄像头 (/dev/video0)"))
     opts.append(('path', None, "手动输入路径…"))
+
+    if not inputs and not imgs:
+        print("  (没找到输入尺寸的 .bin，也没有图片 —— 用摄像头或手动指定)")
+    if outputs or others:
+        # ⚠ 明确说清为什么它们不在列表里，否则用户会以为脚本"看不见"文件
+        print("  -- 以下不当作输入（尺寸不符） --")
+        for p in outputs[:4]:
+            print("     %s  (%d B = 96x96 的**输出**，不是输入)"
+                  % (os.path.basename(p), os.path.getsize(p)))
+        for p in others[:4]:
+            print("     %s  (%d B，既不 %d 也不 %d)"
+                  % (os.path.basename(p), os.path.getsize(p),
+                     IN_BYTES, OUT_SIZE * OUT_SIZE))
+    print()
 
     for i, (_, _, label) in enumerate(opts, 1):
         print("  %2d) %s" % (i, label))
