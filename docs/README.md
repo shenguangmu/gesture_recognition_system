@@ -10,6 +10,7 @@
 | **`board-test-log-2026-09-21.md`** | 首次上板实测：②③ 通过、DMA 根因、摄像头定位 | 继续排查的人 |
 | **`board-test-log-2026-09-22.md`** | **第二次上板**：MMCM + 引脚映射两个根因、**摄像头仍未通** | 查摄像头时参考 |
 | **`board-test-log-2026-09-23.md`** | **第三次上板**：修掉两个真缺陷（crop_scale 固定步长 / roi_y 流缺陷），**板上输出首次与 golden 逐字节一致** | **接着上次查时先读这个**（最新） |
+| **`pl-to-ps-handoff.md`** | **给 PS/CNN 侧的交付说明**：数据格式、批量造数据、待拍板项、联调接口 | **对接 PS 侧时先看这个** |
 | `gui-reproduction-guide.md` | 全程鼠标操作的复现流程 | 要用 GUI 的人 |
 
 > 原 Sobel 工程的 GUI 复现指南（已实机验证过的那份）在
@@ -112,6 +113,7 @@ README.md                          ← 总入口，含进度表与一键回归�
 ├── docs/hardware-checklist.md            ← 买什么、怎么接
 ├── docs/gui-reproduction-guide.md ← 怎么点出来
 ├── docs/board-test-log-2026-09-23.md ← 已上板：实测记录（**先读这个**）
+├── docs/pl-to-ps-handoff.md       ← 给 PS/CNN 侧的交付说明
 ├── samples/README.md              ← 给 PS/CNN 侧的样例数据（PC 上即可用）
 │
 ├── src_hls/README.md              ← HLS 处理链（语义契约 + cosim 排查）
