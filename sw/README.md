@@ -46,7 +46,7 @@ Sobel 那套驱动（`sobel_driver.c/.h`、`main.c`、`sim_dma.c`）
 | `preproc_driver.h` | 寄存器定义 + API 声明 |
 | `preproc_driver.c` | 驱动实现（双模式：目标 / 主机仿真） |
 | `preproc_sim.c` | **仅供主机仿真**的朴素预处理实现 |
-| `main_preproc.c` | 自检主程序（24 项检查） |
+| `main_preproc.c` | 自检主程序（**26 项检查**） |
 | `build_preproc_sim.sh` | 一键编译运行 |
 
 ---

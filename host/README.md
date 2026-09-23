@@ -181,15 +181,39 @@ uint8，96x96，行优先
 ## gesture_overlay.py —— PYNQ 板上驱动
 
 ```python
+import os, sys
+# ⚠ Jupyter 的工作目录默认是 ~/jupyter_notebooks，不是 ~/ —— 先切过去
+if not os.path.exists('gesture_overlay.py'):
+    os.chdir('/home/xilinx'); sys.path.insert(0, '/home/xilinx')
+
 from gesture_overlay import GesturePipeline
-g = GesturePipeline()              # 加载 overlay
-g.print_info()                     # 先看 IP 认出来没有
+g = GesturePipeline()              # 找同目录的 .bit 并加载
+g.print_info()                     # 先看 IP 认出来没有（应为 3 个）
 g.setup_dma()                      # 分配 DMA 缓冲
 g.config()                         # 配参数
 g.fill_test_pattern()              # 无摄像头时填测试图
 g.run_once()                       # 跑一帧
 g.show()                           # Jupyter 里出图
 ```
+
+> ⚠⚠ **`Overlay()` 的构造器要求显式传路径**（2026-09-23 修）
+>
+> 在 notebook 里 `pynq.Overlay()` 能自动找同名 `.bit`，那是 PYNQ 的**语法糖**；
+> **类构造器没有这个行为**，其签名是
+> `Overlay(bitfile_name, dtbo=None, ...)` —— `bitfile_name` **必填**。
+> 所以早期写的 `Overlay(**kw)` 会直接抛
+> `TypeError: missing 1 required positional argument: 'bitfile_name'`，
+> **板上第一次调用就炸**。
+>
+> 现在 `GesturePipeline()` 内部会自己解析路径（`_find_bitfile()`）：
+> 优先约定名 `gesture_system.bit`，退化到"目录里唯一的 `.bit`"，
+> 多个候选且无约定名时**报错而不瞎猜**（猜错会加载别的设计，
+> 现象是"IP 找不到"，很难往回查）。也可显式传：
+> `GesturePipeline(bitfile='/home/xilinx/gesture_system.bit')`。
+>
+> ⚠ `.hwh` 必须与 `.bit` **同名**（`gesture_system.hwh`）——
+> PYNQ 靠同名配对找 IP 表，名字不一致时**不报错**，
+> 只会**只认出 `default` 一个 IP**。
 
 ### 三个设计点
 
@@ -208,6 +232,8 @@ g.show()                           # Jupyter 里出图
 
 > ⚠ **`ignore_version=True` 可能需要**：PYNQ 镜像基于某个 Vivado 版本，
 > 与本项目的 2025.2 不一致时 `Overlay()` 会报版本错误。先不加，报错再加。
+> ✅ **2026-09-23 实测**：本机 PYNQ 3.0.1 + 2025.2 生成的 overlay
+> **没有报版本错误**，不需要这个参数。
 
 > ⚠ **若 `io_pclk` 没有波形**：先查 `rtl/ov5640_regs.v` 的配置表。
 > ✅ 2026-09-17 已由占位表换成真表（250 条，固化 640×480 RGB565）。
