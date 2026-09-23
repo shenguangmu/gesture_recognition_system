@@ -36,6 +36,7 @@ IP 读回来是 **+248** 而不是 -8 —— 阈值被抬高，**输出全黑**�
 """
 
 import io
+import os
 import sys
 from pathlib import Path
 
@@ -215,6 +216,88 @@ def test_dma_offsets():
 
 
 # =====================================================================
+#  Overlay 构造路径（**这类测试的必要性**）
+#
+#  ⚠⚠ 2026-09-23 补：原来这里只测纯函数（i32 编码 / check_config /
+#    寄存器偏移），**从不实例化 GesturePipeline** —— 于是它没发现
+#    `Overlay(**kw)` 这一行是坏的：
+#
+#        TypeError: __init__() missing 1 required positional
+#                   argument: 'bitfile_name'
+#
+#    63 项全绿，板子上第一次调用就炸。
+#    **测试全绿 ≠ 对。没被覆盖的路径，全绿没有任何意义。**
+#    （和 crop_scale 那个 bug 是同一个模式 —— 见
+#     docs/board-test-log-2026-09-23.md §7）
+#
+#  PC 上没法真装 overlay（没有 pynq），但"构造器的**代码形状**"
+#  是可以静态查的 —— 足够拦住"又写成 Overlay(**kw)"这类回归。
+# =====================================================================
+
+def test_ctor_passes_bitfile():
+    """GesturePipeline 必须把 bitfile 传给 Overlay（PYNQ 3.x 要求必填）。"""
+    import inspect
+    src = inspect.getsource(g.GesturePipeline.__init__)
+
+    # PYNQ 3.x: Overlay(bitfile_name, dtbo=None, ...) —— bitfile_name 必填。
+    # 所以形如 `Overlay(**kw)` / `Overlay()` 的调用是错的。
+    bad = [ln.strip() for ln in src.splitlines()
+           if 'Overlay(' in ln and 'bitfile' not in ln and 'self.ol' in ln]
+    check(not bad,
+          "GesturePipeline.__init__ 把 bitfile 传给了 Overlay"
+          + ("  —— 疑似漏传: %s" % bad if bad else ""))
+
+    # 且必须有一条"解析默认路径"的兜底，否则无参调用会传 None
+    check('_find_bitfile' in src,
+          "无参调用时有 _find_bitfile() 兜底（否则 bitfile=None 传下去）")
+
+
+def test_find_bitfile():
+    """_find_bitfile() 在找不到 .bit 时要**报错**，不能返回 None。"""
+    import tempfile, shutil
+    cwd0 = os.getcwd()
+    d = tempfile.mkdtemp()
+    try:
+        os.chdir(d)
+        # 空目录 -> 必须抛 FileNotFoundError（而不是返回 None 蒙混过去）
+        expect_raises(g._find_bitfile, FileNotFoundError,
+                      "目录里没有 .bit 时 _find_bitfile 报错")
+
+        # 唯一的 .bit -> 认它（退化情形，省得每次写全路径）
+        open('foo.bit', 'w').close()
+        try:
+            got = g._find_bitfile()
+            check(got.endswith('foo.bit'), "唯一的 .bit 被认出来")
+        except Exception as e:
+            check(False, "唯一的 .bit 被认出来 —— 抛了 %s" % type(e).__name__)
+
+        # 多个候选且都不是约定名 -> 必须报错，不能瞎猜
+        open('bar.bit', 'w').close()
+        expect_raises(g._find_bitfile, FileNotFoundError,
+                      "多个 .bit 且无约定名时报错（不瞎猜）")
+
+        # 有约定名 -> 优先认它
+        open('gesture_system.bit', 'w').close()
+        try:
+            got = g._find_bitfile()
+            check(got.endswith('gesture_system.bit'), "约定名 gesture_system.bit 优先")
+        except Exception as e:
+            check(False, "约定名优先 —— 抛了 %s" % type(e).__name__)
+    finally:
+        os.chdir(cwd0)
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_ctor_without_pynq():
+    """PC 上（无 pynq）实例化应给出**可读**的报错，而不是 AttributeError。"""
+    if g._PYNQ:
+        print("    [skip] 板载环境（_PYNQ=True），跳过无 pynq 分支")
+        return
+    expect_raises(g.GesturePipeline, RuntimeError,
+                  "无 pynq 时构造报 RuntimeError（提示只能在板上跑）")
+
+
+# =====================================================================
 def main():
     print("=" * 69)
     print("  gesture_overlay 离线自检（不需要板子）")
@@ -225,6 +308,9 @@ def main():
     test_check_config_rejects()
     test_register_map()
     test_dma_offsets()
+    test_ctor_passes_bitfile()
+    test_find_bitfile()
+    test_ctor_without_pynq()
 
     print("\n" + "=" * 69)
     if _failed == 0:

@@ -60,6 +60,47 @@ except ImportError:
     #   在板上跑，而 PYNQ 镜像自带 numpy，不会走到这个分支。
     _NUMPY = False
 
+def _find_bitfile():
+    """找同目录下的 .bit —— 供 `GesturePipeline()` 无参调用时用。
+
+    ⚠ 为什么要自己找：`pynq.Overlay` 的构造器**要求显式传路径**
+      （见 `GesturePipeline.__init__` 里的说明）。
+      在 notebook 里 `Overlay()` 能自动找同名文件，那是 PYNQ 的
+      语法糖，类构造器没有这个行为。
+
+    优先认本项目约定的名字 `gesture_system.bit`；找不到就看看目录里
+    唯一的 .bit（只有一块板子 / 一份 overlay 时省事）。
+    多个候选且都不叫约定名时**报错而不是瞎猜** —— 猜错等于加载了
+    别的设计，而现象会是"IP 找不到"，很难往回查到是选错文件。
+    """
+    import os
+    here = os.path.dirname(os.path.abspath(__file__))
+
+    # 1) 约定名（优先当前工作目录 —— notebook 通常就是在这里跑的）
+    for d in (os.getcwd(), here):
+        p = os.path.join(d, 'gesture_system.bit')
+        if os.path.isfile(p):
+            return p
+
+    # 2) 退化：目录里唯一的 .bit
+    for d in (os.getcwd(), here):
+        try:
+            cands = sorted(f for f in os.listdir(d) if f.endswith('.bit'))
+        except OSError:
+            cands = []
+        if len(cands) == 1:
+            return os.path.join(d, cands[0])
+        if len(cands) > 1:
+            raise FileNotFoundError(
+                "当前目录有多个 .bit，无法确定用哪个：%s\n"
+                "  请显式指定： GesturePipeline(bitfile='.../gesture_system.bit')\n"
+                "  （目录：%s）" % (cands, d))
+
+    raise FileNotFoundError(
+        "找不到 .bit。请把 gesture_system.bit 传到板上，或显式指定：\n"
+        "  GesturePipeline(bitfile='/home/xilinx/gesture_system.bit')")
+
+
 try:
     from pynq import Overlay, allocate
     _PYNQ = True
@@ -239,11 +280,21 @@ class GesturePipeline(object):
                 "pynq 未安装 —— 本模块只能在 PYNQ-Z2 的板载 Python 里运行。\n"
                 "在 PC 上做静态检查时用 import 即可，但不要实例化。")
 
-        # 默认按 PYNQ 惯例找同名 .bit / .hwh
+        # ⚠⚠ PYNQ 3.x 的 Overlay 签名是
+        #       Overlay(bitfile_name, dtbo=None, download=True, ...)
+        #   —— `bitfile_name` 是**必填位置参数**（没有默认值）。
+        #   写 `Overlay(**kw)` 会直接抛
+        #       TypeError: __init__() missing 1 required positional
+        #                  argument: 'bitfile_name'
+        #   **不会**自动去找同名 .bit —— "无参调用自动找文件"那是
+        #   `pynq.Overlay` 在 notebook 里的语法糖，类构造器没有这个行为。
+        #   所以必须自己把路径解析出来再传进去。
+        if bitfile is None:
+            bitfile = _find_bitfile()
         kw = {}
         if ignore_version:
             kw['ignore_version'] = True
-        self.ol = Overlay(bitfile, **kw) if bitfile else Overlay(**kw)
+        self.ol = Overlay(bitfile, **kw)
 
         self.ip = {}          # 名字 -> MMIO
         self._find_ips()
