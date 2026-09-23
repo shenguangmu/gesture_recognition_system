@@ -8,7 +8,8 @@
 | **`hardware-checklist.md`** | 采购清单 + 引脚映射 + 上电前验证 | 采购 / 接线的人 |
 | **`board-bringup-guide.md`** | **上板实测流程 + 分级验证 + 硬阻塞清单** | 拿到板子的人（上电前必读） |
 | **`board-test-log-2026-09-21.md`** | 首次上板实测：②③ 通过、DMA 根因、摄像头定位 | 继续排查的人 |
-| **`board-test-log-2026-09-22.md`** | **第二次上板**：MMCM + 引脚映射两个根因、**摄像头仍未通** | **接着上次查时先读这个**（最新） |
+| **`board-test-log-2026-09-22.md`** | **第二次上板**：MMCM + 引脚映射两个根因、**摄像头仍未通** | 查摄像头时参考 |
+| **`board-test-log-2026-09-23.md`** | **第三次上板**：修掉两个真缺陷（crop_scale 固定步长 / roi_y 流缺陷），**板上输出首次与 golden 逐字节一致** | **接着上次查时先读这个**（最新） |
 | `gui-reproduction-guide.md` | 全程鼠标操作的复现流程 | 要用 GUI 的人 |
 
 > 原 Sobel 工程的 GUI 复现指南（已实机验证过的那份）在
@@ -70,7 +71,19 @@
 **不含** HLS 部分 —— 那一块去看 `legacy/sobel/docs/GUI复现指南.md`
 （组件式 vs 直接开 HLS 工程、csim 的"假成功"陷阱等，都是通用的）。
 
-### `board-test-log-2026-09-22.md` —— **第二轮实测（最新）**
+### `board-test-log-2026-09-23.md` —— **第三轮实测（最新）**
+
+- **修掉两个真缺陷**（都被 csim/cosim 漏过，靠上板对拍抓出）：
+  ① `crop_scale` 固定步长 → 输出右下角一片空边框
+  ② 跳过 ROI 外行不读流 → **`roi_y` 完全失效**
+- **板级结果**：三次不同输入 / 三种 ROI，**板上输出与 golden 逐字节一致**（各 0/9216）
+- **方法论**：一天内三次"测试全绿却有缺陷"，根因都是**没覆盖到的路径**
+  —— 详见文末「这些坑背后的同一个模式」
+- 已验证比特流存于 `E:oard_testerified_v0.4\`（md5 `23d25563`）
+
+---
+
+### `board-test-log-2026-09-22.md` —— 第二轮实测
 
 查出并修复**两个根因**，但摄像头**仍未通**：
 
@@ -98,7 +111,7 @@ README.md                          ← 总入口，含进度表与一键回归�
 ├── docs/architecture-contract.md          ← 先读这个（做什么、为什么）
 ├── docs/hardware-checklist.md            ← 买什么、怎么接
 ├── docs/gui-reproduction-guide.md ← 怎么点出来
-├── docs/board-test-log-2026-09-21.md ← 已上板：实测记录（先读这个）
+├── docs/board-test-log-2026-09-23.md ← 已上板：实测记录（**先读这个**）
 │
 ├── src_hls/README.md              ← HLS 处理链（语义契约 + cosim 排查）
 ├── rtl/README.md                  ← 手写 Verilog（含验证盲区说明）
@@ -114,4 +127,4 @@ README.md                          ← 总入口，含进度表与一键回归�
 2. `hardware-checklist.md`（买什么、怎么接，含上电前验证）
 3. `board-bringup-guide.md`（怎么上板)
 4. 各模块 README（具体实现与各自的坑）
-5. **接着上次排查**：`board-test-log-2026-09-21.md`（**实测记录，含未解项**）
+5. **接着上次排查**：`board-test-log-2026-09-23.md`（**最新实测记录**）

@@ -54,7 +54,7 @@
 |---|---|---|---|---|
 | 1 | `dvp_capture`（BD 里的 `dvp_capture_0`） | DVP 8bit → AXIS 16bit **RGB565** | **Verilog** | ✅ 已写并验证（`rtl/dvp_capture.v`，TB PASSED 23/23） |
 | 1b | `sccb_master` + `ov5640_regs` + `iobuf_wrap` | SCCB 配置摄像头 | **Verilog** | ✅ SCCB TB PASSED 10/10；配置表已换真表（250 条）。⚠ **2026-09-21 上板：事务有发出但无 ACK**（`cfg_error=1`），未出图 |
-| 2–7 | **`gesture_preproc`**（HLS 单一 IP）<br>内含：crop_scale → 高斯 → Sobel → 自适应阈值 → 闭运算 | AXIS 16bit RGB565 → AXIS 8bit 灰度 96×96 | **HLS** | ✅ csim + csynth 全 II=1 + cosim 6/6；IP = `user:hls:gesture_preproc:1.0` |
+| 2–7 | **`gesture_preproc`**（HLS 单一 IP）<br>内含：crop_scale → 高斯 → Sobel → 自适应阈值 → 闭运算 | AXIS 16bit RGB565 → AXIS 8bit 灰度 96×96 | **HLS** | ✅ csim（7 组用例）+ csynth 全 II=1 + cosim **10/10**；板级输出与 golden **逐字节一致**（2026-09-23，三次实测）；IP = `user:hls:gesture_preproc:1.0` |
 | 8 | `vdma`（+ `ic_hp1`/`ic_hp2`） | AXIS ↔ DDR（3 帧缓存） | **Xilinx VDMA IP** | ✅ 已集成（显示通路） |
 | 8b | `dma_in` / `dma_out`（+ `ic_hp3`） | DDR → 预处理 → DDR | **Xilinx AXI DMA** | ✅ 已集成（CNN 通路） |
 | 9 | `hdmi_out` | DDR → HDMI | 视频 IP + **TMDS 编码器** | ⚠ **TMDS 未做** —— BD 导出的 22 个 `hdmi_vid_out_*` 端口在比特流里**悬空**，走 DRC 豁免。**上板不要接 HDMI 线** |
@@ -292,7 +292,7 @@ S2MM 必须先武装，否则预处理输出的第一拍没有接收方。
 
 | 资源 | 用量 | 占比 | 对比旧版 |
 |---|---|---|---|
-| Slice LUTs | 24,442 | 45.94% | ↑ 旧版 12,735 (23.94%) |
+| Slice LUTs | 24,442 | 45.94% | ↑ 旧版约 21–24%（多次构建实测 11,255 / 12,735 / 12,829，布线有波动） |
 | Slice Registers | 30,692 | 28.85% | ↑ 旧版 15,736 (14.79%) |
 | Block RAM | 25.5 | 18.21% | — 不变 |
 | DSPs | 61 | 27.73% | — 不变 |
@@ -387,7 +387,7 @@ PL 做每像素一次操作的带宽型任务，PS 做需要循环迭代与权�
 | PS7 DDR 参数 | ✅ 已修正为 `MT41K256M16 RE-125` 并重跑验证 |
 | 摄像头选型 | ✅ **已定（2026-09-17）：PMOD-CAMERA v1.0，直插 Pmod A+B** |
 | **`ov5640_regs.v` 寄存器表** | ✅ **已替换为真表（250 条，正点原子来源，固化 640x480）**；✅ 2026-09-21 上板确认**事务发出去了**，但**无 ACK**（`sccb_0/cfg_error=1`）→ 问题在 XCLK 或接线，**不是表内容** |
-| 板级实测 | ⚠ **部分完成（2026-09-21）**：②③ 预处理链 **11/11 全过**（单帧 ≈5 ms）；④~⑧ 摄像头通路**未通**（卡在 SCCB），**未出图** |
+| 板级实测 | ⚠ **部分完成**：②③ 预处理链 **11/11 全过**（2026-09-21，单帧 ≈5 ms）；④~⑧ 摄像头通路**未通**（卡在 SCCB），**未出图**。<br>✅ **静态图通路（方案 A）已充分验证**（2026-09-23）：三次不同输入 / 三种 ROI，**板上输出与 golden 逐字节一致**（各 0/9216）。见 `board-test-log-2026-09-23.md` |
 | 引脚分配表 | ⚠ XDC 映射是**推理**的（原理图"镜像编号"），**至今未做万用表实测复核**，插错会烧板。⚠ **当前故障的候选原因之一**（见 `docs/board-test-log-2026-09-21.md` §5.0） |
 | HDMI 输出 | ❌ 未实现（无 TMDS 编码器；22 个端口在比特流里悬空，**上板不要接 HDMI 线**） |
 | PYNQ 镜像与 2025.2 的兼容性 | ⚠ 未验证 |

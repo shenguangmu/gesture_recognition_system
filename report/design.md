@@ -306,13 +306,16 @@ crop_scale（640×480 → 96×96）→ 高斯 → Sobel → 自适应阈值 → 
 
 | 资源 | 用量 | 占比 | 说明 |
 |---|---|---|---|
-| Slice LUTs | **11,255** | **21.16%** | |
-| Slice Registers | 14,810 | 13.92% | |
+| Slice LUTs | **24,442** | **45.94%** | ⚠ 比早期版本接近翻倍，见下方说明 |
+| Slice Registers | **30,692** | **28.85%** | |
 | **DSP48E1** | **61** | **27.73%** | ⚠ 主要来自 HLS 的 `morph_stage` 索引乘法（见 §4.2） |
 | Block RAM Tile | 25.5 | 18.21% | |
 
-> 数据取自 `../vivado/build-report.md`，与 `utilization.rpt` **逐项核对过**
-> （2026-09-18 复核，四个数字一致）。
+> 数据取自 `../vivado/build-report.md`，与 `utilization.rpt` **逐项核对过**。
+> **2026-09-23 更新**：`crop_scale` 改为按比例分配后 LUT/FF 大幅上升
+> （`acc[96]` 累加器需 `ARRAY_PARTITION complete` 以保 II=1，
+> 换来处理周期 1.93× 提速）。**BRAM / DSP 两项不变。**
+> 详见 `build-report.md` §一。
 >
 > ⚠ 旧版说明栏写的是"DSP 主要来自 HLS 的整数除法" —— **那是错的**，
 > 且是本节**最早的一版错误**（后来还错过第二次，见 §4.2）。
