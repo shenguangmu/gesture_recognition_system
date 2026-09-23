@@ -71,11 +71,29 @@ python capture_frame.py --camera 0 --out frame.bin
 | `reg_ident.py` | 逐寄存器探针，弄清 DMA 地址映射 | ⚠ **含我自己的误读**，见下 |
 | `camera_probe.py` | 摄像头通路：VDMA 帧计数**本次运行中是否增长** | ⭐ **留着** —— 摄像头排查的主工具 |
 | `vdma_bypass_test.py` | 找出本版 PYNQ 上访问 vdma 寄存器的可用方式 | ⭐ 留着（绕开中断依赖的方法） |
+| `dma_diag.py` | 查 `dma_in`/`dma_out` 卡在哪（`bringup_check` 报 ap_done 超时时用它） | ⭐ **留着**，注意用 **v2** |
+| `ap_done_probe.py` | `ap_done` 何时置位 + DMA 搬没搬 —— **不依赖 DMA 状态位解读** | ⭐ 留着 |
+| `ap_start_probe.py` | 验证 `ap_start` 是否真正送达 IP | ⭐ 留着 |
 
-> ⚠ **还有两个当天用过但没进仓库**：`ap_done_probe.py`、`dma_diag.py`
-> —— 它们**只存在于 `docs/board-test-log-2026-09-21.md` 的记载里**
-> （前者是定位故障的第一步，后者的结论已被作废）。
-> **要复现那一步的话，需要照实测记录 §5.3 的说明重写**，仓库里没有现成的。
+> ### ⭐ 这三个是"反过来做"的产物，值得说清楚
+>
+> `dma_diag` 有过 v1/v2 两版，**都在"怎么解读 DMA 状态寄存器"上出错**：
+>
+> | 版 | 错在哪 |
+> |---|---|
+> | v1 | 把 DMASR 的 **bit1(IDLE)** 当成 IOC → "IDLE=0" 被误读成"在忙" |
+> | v2 | 修正为：轮询时**不读 CTRL**、只读 DMASR；循环后再取一次快照。<br>（v1 边读边判，读到的 0 不能证明"没跑完"） |
+>
+> `ap_done_probe.py` 就是因为这两版都不可信才写的 ——
+> **它干脆不解读状态位**，只测两个硬事实：
+>   ① `ap_done` 何时置位（软件计时，不靠轮询读 CTRL）
+>   ② DMA 到底搬没搬
+>
+> > **教训**：当"怎么读寄存器"本身都存疑时，
+> > **换一个不依赖该解读的测法**，比继续修正解读方式更可靠。
+>
+> ⚠ 2026-09-23 清理板子时，这三个**只存在于板上、仓库里没有** ——
+> 差点随清理一起丢掉。现已纳入版本库（提交 `499cf78`）。
 
 > ⚠ **`reg_ident.py` 你自己看的时候要留意**：`ap_done_probe` 曾报
 > "MM2S_DMACR 写 `0x1001` 读回 `0x00011003`"，据此怀疑地址映射错了 ——
@@ -323,3 +341,58 @@ ValueError: I/O operation on closed file
 > **没有抽成共享模块**，理由与上面一致：`host/` 和 `scripts/` 是两个目录，
 > 跨目录 import 要额外塞 `sys.path`，**比重复两行守卫更脆**。
 > 真正值钱的是这段解释，不是那两行代码。
+
+---
+
+## ⚠ 清理板子前：先查"仓库里有没有"
+
+**2026-09-23 清理 `/home/xilinx/` 时发现的**：有 **5 个脚本只存在于板上**，
+仓库里一个都没有 —— 其中三个（`dma_diag` / `ap_done_probe` / `ap_start_probe`）
+**装着 9 月排查故障时试错得来的结论**（见上文）。
+
+**如果按常规做法直接 `rm`，那些经验就随文件一起没了。**
+
+### 清理前的检查清单
+
+```bash
+# 1. 板上每个脚本，在仓库里找对应版本
+for f in /home/xilinx/*.py; do
+    b=$(basename $f)
+    [ -f host/$b ] && echo "仓库有: $b" || echo "⚠ 仓库没有: $b"
+done
+
+# 2. 仓库有的，比对 md5（可能板上是旧版，也可能是本地改过的）
+md5sum host/$b; ssh xilinx@192.168.2.99 "md5sum /home/xilinx/$b"
+```
+
+**分三种情况处理**：
+
+| 情况 | 处理 |
+|---|---|
+| 仓库有、md5 **相同** | 可直接删（可再生） |
+| 仓库有、md5 **不同** | ⚠ **先 diff** —— 可能是板上更新过（如 `bringup_check.py` 板上曾是旧版，仓库才是修过的） |
+| **仓库没有** | ⚠⚠ **先看内容再决定** —— 很可能有独有内容 |
+
+### 清理流程（别跳过备份）
+
+```bash
+# 先备份到 PC（哪怕打算删）—— 万一漏判还能捞回来
+mkdir -p board_cleanup_backup && cd board_cleanup_backup
+for f in <要删的文件>; do scp xilinx@<IP>:/home/xilinx/$f .; done
+ls -la    # 核对齐全后再执行删除
+```
+
+### ⚠ 两个容易踩的
+
+- **`scp` 的远程路径不支持 `{a,b,c}` 大括号展开** —— 会报
+  `No such file or directory`，得逐个传或先在板上打包
+- **root 所有的文件删不掉**（用 `sudo` 跑脚本产生的，如 `hw.bin`）
+  —— Jupyter 本身是 root，在里面 `os.remove()` 即可
+
+### 别碰的系统文件
+
+`.bashrc` / `.profile` / `.bash_history` / `pynq`（软链）/ `REVISION` /
+`.sudo_as_admin_successful` / `.cache` / `.local` / `.ssh` / `jupyter_notebooks`
+
+> **一句话**：板子上的东西**不都是可再生的**。
+> 删除前先回答"这个仓库里有吗、是不是同一版"，再动手。
