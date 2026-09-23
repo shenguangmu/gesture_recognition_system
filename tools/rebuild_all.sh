@@ -34,12 +34,42 @@ UPLOAD=0
 say() { printf '\n\033[1m>>> %s\033[0m\n' "$*"; }
 
 # ---------------------------------------------------------------------
+# ⚠⚠ 前置检查：不能有 Vivado 进程存活
+#
+#   两件事会留下孤儿 Vivado：
+#     ① 中途 Ctrl-C / TaskStop —— 那杀的是 bash，vivado.bat 继续跑
+#     ② 上一次构建异常退出
+#   它们在跑时会**锁住** impl_1/vivado.jou、runme.log 等文件，
+#   于是下面的 rm 失败、脚本半途而废，**还会在残缺目录上继续跑**，
+#   产出一个不可信的比特流。2026-09-23 就是这么栽的。
+# ---------------------------------------------------------------------
+if command -v tasklist >/dev/null 2>&1; then
+    if tasklist 2>/dev/null | grep -qi "vivado.exe"; then
+        echo "!!! 检测到 vivado.exe 还在运行 —— 它会锁住工程文件，先关掉它再重建"
+        tasklist 2>/dev/null | grep -i "vivado.exe"
+        exit 1
+    fi
+fi
+
+# ---------------------------------------------------------------------
 say "0/5  清理全部缓存（HLS + Vivado）"
 # ⚠ 三处都要删：只删 vivado/gesture_system 不够，
 #   还有仓库根的 .Xil、以及可能残留的 .hls.failed
 rm -rf "$ROOT/gesture_comp" "$ROOT/.hls.failed" "$ROOT/vivado/gesture_system"
 rm -rf "$ROOT/vivado/.Xil" "$ROOT/.Xil"
 echo "    已删: gesture_comp/  vivado/gesture_system/  .Xil/"
+
+# ⚠⚠ 确认真的删干净了。`rm -rf` 遇到占用文件会**部分失败**并继续 ——
+#   若不查，就会在**残缺的工程目录**上继续构建，产出不可信的比特流。
+#   2026-09-23 的教训：上面那道进程检查没拦住时，这一道是最后的防线。
+for d in "$ROOT/gesture_comp" "$ROOT/vivado/gesture_system"; do
+    if [ -e "$d" ]; then
+        echo "!!! 清理失败，$d 仍然存在 —— 多半是有进程占着文件"
+        echo "    先关掉 Vivado（tasklist | grep -i vivado）再重跑"
+        exit 1
+    fi
+done
+echo "    清理已确认"
 
 # ---------------------------------------------------------------------
 say "1/5  HLS：csim + csynth + 导出 IP"

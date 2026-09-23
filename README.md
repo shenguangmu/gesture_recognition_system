@@ -109,7 +109,33 @@
 ### 从零构建完整工程（综合 → 比特流 → XSA）
 
 上面那组命令只到「BD 构建 + validate」，**不出比特流**。
-要拿到可上板的 `.bit` 与 `.xsa`，走下面这条链：
+要拿到可上板的 `.bit` 与 `.xsa`，走下面这条链。
+
+## ⭐ 推荐：一键重建（2026-09-23 起）
+
+```bash
+bash tools/rebuild_all.sh              # 全清缓存 → HLS → Vivado → 校验产物
+bash tools/rebuild_all.sh --upload     # 再传板 + 核 md5
+```
+
+**为什么用脚本而不是手敲两条命令**（都是实际踩过的）：
+
+- HLS 导出的 IP **版本号永远叫 `gesture_preproc:1.0`**（`run_gesture.tcl` 里写死），
+  新旧实现 **VLNV 完全相同** → Vivado 取了旧 IP 也不会报错，只会**默默用错实现**
+- `gesture_comp/` 不在仓库里、`vivado/gesture_system/` 里有多处 IP 缓存
+  （`.cache` / `.gen` / `.runs`），**只删一处不够**
+- 脚本会**硬性校验**三条：`use_ila=0`、DMA 位宽 24、时序两侧为正 ——
+  缺任一条就 `exit 1`，不给你一个废比特流
+- 最后打印 `.bit` / `.hwh` 的 md5，**上板前拿它对一遍**
+
+> ⚠ **跑之前先确认没有 Vivado 进程存活**，否则它会锁住
+> `impl_1/vivado.jou` 等文件 → `rm` 失败 → 脚本半途而废。
+>
+> ⚠ **别用 Ctrl-C（或 `TaskStop`）中断脚本** —— 那杀的是 bash，
+> `vivado.bat` 会变成**孤儿进程**继续跑，下次重建就被它挡住。
+> 中断后用 `tasklist | grep -i vivado` 确认干净再重来。
+
+### 手动两步（等价，供参考）
 
 ```bash
 # ① 【必须先做】跑 HLS，产出 IP 仓库
@@ -131,6 +157,14 @@ vivado -mode batch -source vivado/create_project.tcl -tclargs --synth 0
 | `gesture_system.xsa` | 含比特流 + `.hwh`，给 Vitis / PYNQ 用 |
 | `gesture_system/utilization.rpt` | 资源报告 |
 | `gesture_system/gesture_system.runs/impl_1/*.bit` | 比特流 |
+
+> ⚠⚠ **PYNQ 要的是 `.bit` + 改过名的 `.hwh`**
+>
+> xsa 里那个文件叫 **`bd_video.hwh`**，必须**改名成 `gesture_system.hwh`**。
+> PYNQ 靠**同名配对**找 IP 表：`gesture_system.bit` ⟷ `gesture_system.hwh`。
+> 名字不一致时它**不报"找不到 hwh"**，而是**只认出 `default` 一个 IP** ——
+> 然后 `g.ip['preproc']` 之类统统找不到，现象很难往回追。
+> `rebuild_all.sh` 已自动改名。
 
 > ⚠ **`gesture_comp/`（HLS 产物）不在本仓库里** —— 它被 `.gitignore` 忽略，
 > 因为它完全可由 `run_gesture.tcl` 重建。所以**克隆下来必须先跑第 ① 步**。
@@ -244,7 +278,11 @@ vivado -mode batch -source vivado/create_project.tcl -tclargs --synth 0
 
 | 坑 | 在哪 | 代价 |
 |---|---|---|
+| **跳过 ROI 外行时不读流 → `roi_y` 完全失效** | `docs/board-test-log-2026-09-23.md` §8 | 寄存器读回**完全正确**、行为恒等于 `roi_y=0`；`roi_x` 却正常。**csim/cosim 全绿**（ref 是数组遍历、没有流的概念），唯一信号是"输入流没读空" |
 | **AXI DMA 的 `C_SG_LENGTH_WIDTH` 默认 14 位** | `vivado/README.md` · `skill/pitfalls/README.md` P10 | 单次传输只搬前 16 KB，**"传输完成"照常置位**，下游 IP 静默卡死。上板排查耗时最长的一条 |
+| **HLS 导出的 IP 版本号永远叫 `1.0`** | `src_hls/run_gesture.tcl` | 新旧实现 **VLNV 完全相同** → Vivado 取了旧 IP 不报错、**默默用错实现**。改源码后务必全清重建 |
+| **`Overlay()` 类构造器要求显式传 `bitfile`** | `host/gesture_overlay.py` | notebook 里 `Overlay()` 能自动找同名文件是**语法糖**，类构造器没这行为 → 板上首次调用即 `TypeError` |
+| **ILA 开着会让正式比特流 hold 违例** | `vivado/bd_video.tcl` 的 `use_ila` | BRAM 涨到 52.5%，并引入 `XCLK→PS时钟` 的 **WHS −1.830 ns**（跨异步域，物理修不了）。提交前必须置 0 |
 | **XDC 不支持 `if`** | `vivado/README.md` | 约束整段静默失效，只给 CRITICAL WARNING |
 | **AXI 互连的时钟/复位是每端口一个** | `vivado/README.md` | 漏连则互连永远复位，**综合实现比特流全过、上板才炸** |
 | **wrapper 有两份副本** | `vivado/README.md` | 综合用旧的那份，报错指向 wrapper 但根因在别处 |
@@ -253,6 +291,23 @@ vivado -mode batch -source vivado/create_project.tcl -tclargs --synth 0
 | **OV5640 是 16 位子地址、4 字节事务** | `rtl/README.md` | 按 3 字节写则真机上摄像头完全没反应 |
 | **`cam_data` 必须与 `cam_href` 同级寄存** | `rtl/README.md` | 行首错一个字节，现象极隐蔽 |
 | **状态位在 `CTRL(0x00)` 不在 `0x04`** | `sw/README.md` | 轮询永远等不到，而仿真自己造假值掩盖了它 |
+
+### ⭐ 这些坑背后的同一个模式
+
+2026-09-23 一天之内连踩三次，值得单独记：
+
+| 缺陷 | 为什么 csim / 离线测试全绿 |
+|---|---|
+| `crop_scale` 固定步长填不满 96 | HLS / C++ golden / Python golden **三份实现抄了同一套错误逻辑** |
+| `Overlay()` 漏传 `bitfile` | 离线测试**只测纯函数**，从不实例化 `GesturePipeline` |
+| 跳过 ROI 外行不读流 | `gesture_ref.cpp` 是**数组遍历，没有"流"的概念**，两边在同一个错误窗口下算出一致结果 |
+
+> **"测试通过"只在测试覆盖到的范围内有意义。没被覆盖的路径，全绿毫无价值。**
+>
+> 三条对策（都已落地）：
+> 1. 判据尽量**不依赖 golden**（TB 用例 6 用纯几何：有源覆盖的块必须非零）
+> 2. 覆盖**构造路径**，不只覆盖纯函数
+> 3. 找**被测实现无法自我辩解**的物理量（TB 用例 7 用"输入流剩余元素数"）
 
 ---
 
