@@ -174,7 +174,7 @@ inline void emit(ix_t &o, ap_uint<8> v, bool last)
  * 净效果见文件头「统一约定」第 1 条。
  *
  * 输出长度恒为 GESTURE_OUT_PIXELS，与输入分辨率无关；
- * 这是与 CNN 侧的契约，见 docs/架构与接口契约.md §3.1。
+ * 这是与 CNN 侧的契约，见 docs/architecture-contract.md §3.1。
  *
  * ⭐ 缩放采用**按比例分配**，不是固定步长 —— 见下方注释。
  */

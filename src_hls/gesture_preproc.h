@@ -2,20 +2,31 @@
  * @file    gesture_preproc.h
  * @brief   手势图像预处理链 —— 对外契约（寄存器映射 / 参数 / 共享类型）
  *
- * 本文件被四处共享，改之前先读 docs/architecture-contract.md：
+ * 本文件被三处共享，改之前先读 docs/architecture-contract.md：
  *   1. HLS 综合源码      src_hls/gesture_preproc.cpp
  *   2. HLS C 仿真 TB     src_hls/tb_gesture.cpp
  *   3. 各阶段参考实现    src_hls/gesture_ref.cpp
- *   4. PS 端驱动         sw/gesture_driver.h
+ *
+ * ⚠ PS 侧驱动 **不** include 本文件，只同步常量/寄存器偏移。
+ *   对应的文件是 sw/preproc_driver.h（曾误写作 sw/gesture_driver.h，
+ *   该名字在本仓库从未存在过）。改这里的几何空间常量或寄存器偏移，
+ *   要同步改的正是它。
  *
  * ────────────────────────────────────────────────────────────────────
- *  处理链
+ *  处理链（与实际实现一致）
  * ────────────────────────────────────────────────────────────────────
- *   RGB565 ─► rgb2gray ─► gaussian ─► sobel ─► adaptive_thresh
- *                           │                      │
- *                           └──── thresh_mode ─────┘   (二选一)
+ *   RGB565 ─► crop_scale ─► gaussian ─► sobel ─► thresh
+ *             640x480          └──── 以下全部在 96x96 上跑 ────┘
  *                                    │
- *                              morph_close ─► roi_extract ─► 96x96 灰度
+ *                              morph ─► 96x96 灰度
+ *
+ * ⚠ 几何处理在最前：先裁剪缩放到 96x96，再做滤波/阈值/形态学。
+ *   这是**省算力**的关键设计 —— 昂贵算子只在小图上跑（33 倍差距），
+ *   与 gesture_preproc.cpp 文件头「处理链」一节一致。
+ *   这里原先画成"先滤波后 roi_extract"，与实现相反，已更正。
+ * ⚠ 各级的实际函数名见 .cpp 内部：crop_scale / gaussian_stage /
+ *   sobel_stage / thresh_stage / morph_stage / output_stage
+ *   （后五个是 static，只在本翻译单元内可见）。
  *
  * ────────────────────────────────────────────────────────────────────
  *  与 sobel_hls.h 的关系
@@ -135,36 +146,30 @@ typedef ap_axiu<8, 0, 0, 0> axis_gray_t;
 #define GESTURE_DEFAULT_ROI_H  320
 
 /* ================================================================== *
- *  五、各阶段函数声明
+ *  五、各阶段函数：**不在本文件暴露**
  *
- *  均为纯 axilite 参数（无 AXI 接口），方便单独 csim。
- *  顶层 gesture_preproc() 用 DATAFLOW 把它们串起来。
+ *  ⚠ 这里原先声明了 6 个流式阶段函数
+ *      rgb2gray / gaussian_3x3 / sobel_core /
+ *      adaptive_thresh / morph_close / roi_extract
+ *    但**全仓库从未有过它们的实现**（已核实：零调用点，仅声明）。
+ *    留着会误导 —— 读到的人会以为可以单独例化/单独 csim，
+ *    实际上链接就会报 undefined reference。已删除。
+ *
+ *  真正的各阶段实现是 src_hls/gesture_preproc.cpp 里的
+ *      crop_scale / gaussian_stage / sobel_stage /
+ *      thresh_stage / morph_stage / output_stage
+ *  它们全部是 **static**（文件内可见），由顶层按 DATAFLOW 串联。
+ *
+ *  ⚠ 为什么不做成对外可调用的阶段函数：
+ *    顶层必须是"纯流函数 + 参数按值传递"的结构（见 .cpp 里
+ *    preproc_pipeline 的长注释）—— 把 s_axilite 参数直接用在
+ *    DATAFLOW 区域内的函数里，会触发 [HLS 200-616] 仿真死锁。
+ *    想单独跑某一级，正确做法是走 TB（src_hls/tb_gesture.cpp）。
+ *
+ *  ⚠ 名字撞车提醒：gesture_ref.cpp 里另有两个**同名但签名不同**的
+ *    函数 adaptive_thresh / morph_close（参数是裸数组 + offset/enable），
+ *    属于参考实现，与上面删掉的流式声明不是一回事，勿混。
  * ================================================================== */
-
-void rgb2gray(hls::stream<axis_rgb_t>  &src,
-              hls::stream<axis_gray_t> &dst,
-              int width, int height);
-
-void gaussian_3x3(hls::stream<axis_gray_t> &src,
-                  hls::stream<axis_gray_t> &dst,
-                  int width, int height);
-
-void sobel_core(hls::stream<axis_gray_t> &src,
-                hls::stream<axis_gray_t> &dst,
-                int width, int height, int gain);
-
-void adaptive_thresh(hls::stream<axis_gray_t> &src,
-                     hls::stream<axis_gray_t> &dst,
-                     int width, int height, int offset);
-
-void morph_close(hls::stream<axis_gray_t> &src,
-                 hls::stream<axis_gray_t> &dst,
-                 int width, int height);
-
-void roi_extract(hls::stream<axis_gray_t> &src,
-                 hls::stream<axis_gray_t> &dst,
-                 int width, int height,
-                 int roi_x, int roi_y, int roi_w, int roi_h);
 
 /* ================================================================== *
  *  六、顶层：接口契约
