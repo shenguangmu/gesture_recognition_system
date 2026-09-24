@@ -61,7 +61,27 @@ module sccb_master #(
     // 状态
     output reg         cfg_done,
     output reg         cfg_error,   // 某次事务没收到 ACK
-    output reg  [7:0]  done_cnt
+    output reg  [7:0]  done_cnt,
+
+    // ────────────────────────────────────────────────────────────────
+    //  失败定位（2026-09-24 新增）
+    //
+    //  ⚠ 为什么需要这两根线：原来只输出 cfg_error 一根线，于是
+    //    "配完了但出不来图"时无法回答**最关键的二分问题** ——
+    //
+    //        第 1 条就 NACK  →  总线层问题（上拉/接线/器件地址/电源）
+    //        中间某条 NACK   →  该条寄存器值不被接受（或前一条把它带跑）
+    //
+    //    这两者的排查方向完全相反，而原来两种情况在外部看起来一模一样：
+    //    cfg_error=1、done_cnt=250、cfg_done=1。
+    //
+    //  ⚠ 注意 done_cnt 是**事务计数**，不是**成功计数** ——
+    //    它遇到 NACK 也照样递增（见 S_NEXT）。所以看到
+    //    done_cnt==N_REGS 且 cfg_done==1 时，"全都成功"和"全都失败"
+    //    的可能性是一致的。必须靠下面两根线区分。
+    // ────────────────────────────────────────────────────────────────
+    output reg  [7:0]  first_err_addr,  // 首个 NACK 事务的 tbl_addr（-1 = 无）
+    output reg  [7:0]  nack_cnt         // NACK 总次数（饱和在 255）
 );
 
     // 一次事务的总字节数 = 1(设备地址) + SUB_ADDR_BYTES + 1(数据)
@@ -114,6 +134,10 @@ module sccb_master #(
             cfg_done  <= 1'b0;
             cfg_error <= 1'b0;
             done_cnt  <= 8'd0;
+            // 0xFF 是"尚未发生任何失败"的哨兵值，不是合法的表索引
+            // （表长 250 = 0xFA，最大合法 tbl_addr 是 0xF9）。
+            first_err_addr <= 8'hFF;
+            nack_cnt       <= 8'd0;
             scl_phase <= 1'b0;
         end else begin
             case (state)
@@ -198,8 +222,33 @@ module sccb_master #(
                         scl_phase <= 1'b1;
                     end else begin
                         scl <= 1'b1;
-                        if (CHK_ACK != 0 && sda_i != 1'b0)
-                            cfg_error <= 1'b1;  // 从机没拉低 = NACK
+                        if (CHK_ACK != 0 && sda_i != 1'b0) begin
+                            /* 从机没拉低 = NACK。
+                             *
+                             * ⚠⚠ 必须用 s_ack 标记"这是数据字节的 ACK"。
+                             *   一次事务 = 4 字节（设备地址 + 地址高 + 地址低
+                             *   + 数据），**每个字节后面都有一个 ACK 位**。
+                             *   一个"被拒"的从机会在 4 个 ACK 位上都 NACK ——
+                             *   若在这里直接计数，nack_cnt 会变成"失败**字节**数"
+                             *   （实测：1 条坏寄存器 → nack_cnt=4），
+                             *   而我们要的是"失败**事务**数"。
+                             *
+                             *   只在最后一个字节（byte_idx == N_BYTES-1）
+                             *   的 ACK 位计数，一次事务才恰好记 1。
+                             *
+                             *   cfg_error 则不受影响 —— 它是**粘滞的 1 位**，
+                             *   在哪个字节置位都一样，保持原行为不放大改动。
+                             */
+                            cfg_error <= 1'b1;
+                            if (byte_idx == N_BYTES[2:0] - 3'd1) begin
+                                // 只记**首个**失败的地址 —— 后续 NACK 往往是
+                                // 总线失去同步的连带结果，记第一个才能定位根因。
+                                if (first_err_addr == 8'hFF)
+                                    first_err_addr <= tbl_addr;
+                                if (nack_cnt != 8'hFF)
+                                    nack_cnt <= nack_cnt + 8'd1;  // 饱和在 255
+                            end
+                        end
                         scl_phase <= 1'b0;
                         bit_idx   <= 3'd7;
 

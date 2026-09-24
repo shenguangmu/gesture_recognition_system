@@ -988,6 +988,21 @@ if {$use_ila} {
         #   ⚠ `iobuf_sda_0/io_pad` 是 **inout**，同样不能直接接探针
         #     （和双向端口 io_sda 是同一个坑）。要看 SDA 就用
         #     `sccb_0/sda_oe`（驱动使能）和 `sccb_0/sda_o`（输出值）。
+        #
+        # ⚠⚠ 2026-09-24 新增 first_err_addr / nack_cnt 两个探针。
+        #   用途：回答摄像头调试里**最关键的二分问题** ——
+        #
+        #     first_err_addr == 0x00  → 第 1 条就 NACK
+        #                               = 总线层问题（上拉/接线/器件地址/电源）
+        #     first_err_addr == 别的  → 中间某条 NACK
+        #                               = 该条寄存器值不被接受
+        #
+        #   这两个方向排查起来完全相反，而在新增这两根线之前，
+        #   两种情况在探针上长得**一模一样**：cfg_error=1、done_cnt=250、
+        #   cfg_done=1（done_cnt 是事务计数，NACK 也照样递增）。
+        #   ⚠ nack_cnt 单位是**事务**（1 条坏寄存器记 1，不是 4）——
+        #     它在数据字节的 ACK 位计数，见 rtl/sccb_master.v S_ACK 注释。
+        #   ⚠ 哨兵：first_err_addr == 0xFF 表示**从未失败**。
         set probes [list \
             [list 16 [get_bd_pins dvp_capture_0/frame_cnt]] \
             [list 16 [get_bd_pins dvp_capture_0/line_cnt]] \
@@ -1003,6 +1018,8 @@ if {$use_ila} {
             [list  1 [get_bd_pins sccb_0/scl]] \
             [list  1 [get_bd_pins sccb_0/sda_oe]] \
             [list  1 [get_bd_pins sccb_0/sda_o]] \
+            [list  8 [get_bd_pins sccb_0/first_err_addr]] \
+            [list  8 [get_bd_pins sccb_0/nack_cnt]] \
         ]
 
         set n 0
@@ -1061,7 +1078,8 @@ if {$use_ila} {
         set probe_names [list frame_cnt line_cnt vsync_sync href_sync io_pclk \
                               io_d xclk_out sccb_tbl_addr sccb_done_cnt \
                               sccb_cfg_done sccb_cfg_error sccb_scl \
-                              sccb_sda_oe sccb_sda_o]
+                              sccb_sda_oe sccb_sda_o \
+                              sccb_first_err_addr sccb_nack_cnt]
         foreach pr $probes {
             set src [lindex $pr 1]
             set nm  [lindex $probe_names $n]
