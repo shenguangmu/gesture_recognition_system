@@ -110,7 +110,8 @@ def ssh(board, cmd, check=True):
     """
     p = subprocess.run(['ssh', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=10',
                         board, cmd],
-                       capture_output=True, text=True, env=_scp_env())
+                       capture_output=True, text=True, env=_scp_env(),
+                       encoding='utf-8', errors='replace')
     if check and p.returncode != 0:
         return False, (p.stderr or p.stdout).strip()
     return p.returncode == 0, (p.stdout or '').strip()
@@ -132,6 +133,50 @@ def check_board(board):
 
 
 # ---------------------------------------------------------------------
+def crop_report(src):
+    """报告这张图会被裁掉多少。
+
+    ⚠ 为什么值得单独报：转换是 **cover**（按比例缩放到填满，再居中裁剪），
+      裁掉的量取决于**宽高比**，而且**完全静默** —— 转出来的 .bin
+      永远"尺寸正确"（614400 字节），你不会得到任何提示。
+
+      实测（这里就是那张表）：
+
+          16:9 手机横向 1920x1080  →  左右各裁 12.5%，共 25% 宽度
+          4:3  相机     1600x1200  →  不裁
+          3:2  单反     3000x2000  →  左右各裁 5.6%，共 11% 宽度
+          1:1  方图     1000x1000  →  上下各裁 12.5%，共 25% 高度
+          9:16 手机竖拍 1080x1920  →  上下各裁 28.9%，共 58% 高度 ⚠
+          超宽          3000x600   →  左右各裁 36.7%，共 73% 宽度 ⚠⚠
+
+    返回 (描述字符串, 裁掉的比例 0..1)；读不出尺寸时返回 (None, 0)
+    """
+    try:
+        from PIL import Image
+        with Image.open(src) as im:
+            iw, ih = im.size
+            mode = im.mode
+    except Exception:
+        return None, 0.0
+
+    scale = max(W / iw, H / ih)
+    nw, nh = max(1, round(iw * scale)), max(1, round(ih * scale))
+    cw, ch = nw - W, nh - H
+
+    if cw > 0 and cw >= ch:
+        frac = cw / float(nw)
+        msg = ("±%.1f%% 宽（共裁掉 %.0f%%）" % (100 * cw / 2.0 / nw, 100 * frac))
+    elif ch > 0:
+        frac = ch / float(nh)
+        msg = ("±%.1f%% 高（共裁掉 %.0f%%）" % (100 * ch / 2.0 / nh, 100 * frac))
+    else:
+        frac, msg = 0.0, '无（比例正好 4:3 或更窄）'
+
+    if 'A' in mode.upper():
+        msg += '  ⚠ 这张图有透明通道 —— alpha 会被**忽略**，取底层 RGB'
+    return "%dx%d → 居中裁剪 %s" % (iw, ih, msg), frac
+
+
 def convert_image(src, out_bin, out_png=None):
     """图片 → 640x480 RGB565 .bin。
 
@@ -164,7 +209,12 @@ def make_golden(frame_bin, gold_bin, roi):
            '--input', frame_bin,
            '--roi', *[str(v) for v in roi],
            '--out', gold_bin]
-    p = subprocess.run(cmd, capture_output=True, text=True)
+    # ⚠ 必须显式指定 encoding —— Windows 默认用 GBK 解子进程输出，
+    #   而 kid 脚本会打 UTF-8 的中文/符号，撞上就 UnicodeDecodeError，
+    #   而且报在**子线程**里（_readerthread），主流程只看到一段莫名其妙的
+    #   traceback。2026-09-25 实测踩到。
+    p = subprocess.run(cmd, capture_output=True, text=True,
+                       encoding='utf-8', errors='replace')
     if p.returncode != 0:
         return False, (p.stderr or p.stdout).strip()
     return True, ''
@@ -204,7 +254,8 @@ def push_one(board, src, dest, dry=False, quiet=False):
 
     p = subprocess.run(['scp', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=10',
                         src, '%s:%s/' % (board, dest)],
-                       capture_output=True, text=True, env=_scp_env())
+                       capture_output=True, text=True, env=_scp_env(),
+                       encoding='utf-8', errors='replace')
     if p.returncode != 0:
         print("    !! scp 失败：%s" % (p.stderr or p.stdout).strip())
         return False
@@ -294,6 +345,12 @@ def main():
             binp = os.path.join(tmpdir, base + '.bin')
             pngp = os.path.join(tmpdir, base + '_preview.png')
             print("\n  [图片] %s" % os.path.basename(f))
+            rep, frac = crop_report(f)
+            if rep:
+                print("    %s" % rep)
+                if frac > 0.25:
+                    print("    ⚠⚠ 裁掉超过 1/4 —— 手掌若靠边很可能会被切掉。"
+                          "建议先裁成 4:3 再传，或换一张")
             n, png = convert_image(f, binp, pngp)
             print("    → 转成 RGB565：%d 字节（期望 %d）" % (n, IN_BYTES))
             if n != IN_BYTES:
@@ -302,7 +359,9 @@ def main():
                 continue
             stage.append((binp, '%s.bin（RGB565 输入帧）' % base))
             if png:
-                print("    → 预览图 %s  ⚠ 打开看一眼有没有裁错/变形" % png)
+                print("    → 预览图（**转换后的真实画面**）：")
+                print("      %s" % png)
+                print("      ⚠ 打开看一眼 —— 上面那行说的「裁掉多少」在这里是可见的")
 
             if not args.no_golden:
                 roi = tuple(args.roi) if args.roi else auto_roi_of(binp)
