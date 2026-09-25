@@ -4,7 +4,7 @@
     "xci_name": "bd_video_gesture_preproc_0_0",
     "cell_name": "gesture_preproc_0",
     "component_reference": "user:hls:gesture_preproc:1.0",
-    "ip_revision": "2114798536",
+    "ip_revision": "2114801919",
     "gen_directory": "../../../../../../gesture_system.gen/sources_1/bd/bd_video/ip/bd_video_gesture_preproc_0_0",
     "parameters": {
       "component_parameters": {
@@ -34,7 +34,7 @@
       },
       "runtime_parameters": {
         "IPCONTEXT": [ { "value": "IP_Integrator" } ],
-        "IPREVISION": [ { "value": "2114798536" } ],
+        "IPREVISION": [ { "value": "2114801919" } ],
         "MANAGED": [ { "value": "TRUE" } ],
         "OUTPUTDIR": [ { "value": "../../../../../../gesture_system.gen/sources_1/bd/bd_video/ip/bd_video_gesture_preproc_0_0" } ],
         "SELECTEDSIMMODEL": [ { "value": "" } ],
@@ -590,5 +590,5 @@
       }
     }
   },
-  "checksum": "c5df21a7"
+  "checksum": "b820d50b"
 }

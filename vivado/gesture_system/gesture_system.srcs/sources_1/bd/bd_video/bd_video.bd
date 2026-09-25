@@ -868,6 +868,16 @@
             "direction": "O",
             "left": "7",
             "right": "0"
+          },
+          "first_err_addr": {
+            "direction": "O",
+            "left": "7",
+            "right": "0"
+          },
+          "nack_cnt": {
+            "direction": "O",
+            "left": "7",
+            "right": "0"
           }
         }
       },
@@ -925,7 +935,7 @@
       },
       "gesture_preproc_0": {
         "vlnv": "user:hls:gesture_preproc:1.0",
-        "ip_revision": "2114798536",
+        "ip_revision": "2114801919",
         "xci_name": "bd_video_gesture_preproc_0_0",
         "xci_path": "ip\\bd_video_gesture_preproc_0_0\\bd_video_gesture_preproc_0_0.xci",
         "inst_hier_path": "gesture_preproc_0",
