@@ -631,6 +631,12 @@ def main() -> int:
               % (res['roi_x'], res['roi_y'], res['roi_w'], res['roi_h']))
         print("           thresh_mode=1, thresh_offset=-8, gain=256,")
         print("           gauss_en=1, sobel_en=1, morph_en=1)")
+        print()
+        # ⚠ 让两个工具能对上：run.py 的默认 ROI 写在文件顶部，
+        #   想让它俩一致就直接把下面这行贴进 run.py（只改数字，别改结构）。
+        print("想让 run.py 的默认跟这个一致？改 host/run.py 顶部那一行：")
+        print("  ROI = dict(x=%d, y=%d, w=%d, h=%d)"
+              % (res['roi_x'], res['roi_y'], res['roi_w'], res['roi_h']))
 
     if args.draw:
         try:
