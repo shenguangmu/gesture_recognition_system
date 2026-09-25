@@ -357,8 +357,19 @@ class GesturePipeline(object):
         """打印 overlay 里的 IP 与地址 —— 排查用"""
         print("=== overlay 里的 IP ===")
         for name, info in sorted(self.ol.ip_dict.items()):
+            # ⚠ 键名是 `phys_addr`，**不是** `base_addr`。
+            #   `base_addr` 是 PYNQ 2.x 的键，3.x 已改名 —— 写错不报错，
+            #   只是 `.get()` 取不到就回落成 0，所有地址都打印成 0x00000000，
+            #   排查时会误判成"IP 没映射到地址空间"，方向完全错。
+            #
+            # ⚠⚠ 这个坑本文件**已经踩过一次**：下面 `_find_ips` 附近
+            #   2026-09-21 就记录过「`base_addr` 键不存在，误导过一轮」，
+            #   但当时只改了那一处，`print_info()` 这里漏了。
+            #   2026-09-25 上板（PYNQ 3.0.1）再踩一次才发现。
+            #   —— 同一条知识只落在一处，另一处照样错。
+            #   改这类"键名 / 字符串常量"的坑时，务必全文件搜一遍。
             print("  %-40s @ 0x%08X  (%s)" % (
-                name, info.get('base_addr', 0), info.get('type', '?')))
+                name, info.get('phys_addr', 0), info.get('type', '?')))
         print()
         print("=== 本脚本认到的 ===")
         for k, v in self.ip.items():
