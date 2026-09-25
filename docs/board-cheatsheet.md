@@ -45,6 +45,46 @@ scp $BOARD:/home/xilinx/hw_out.bin ./
 > ⚠ **`.bit` 与 `.hwh` 必须同时传**（见下文 §四）。只传一个时 PYNQ
 > **不报错**，只会「只认出 `default` 一个 IP」，很难往回追。
 
+### 1.2.1 ⭐ 用 `host/push.py` 省掉手敲（推荐）
+
+`scp` 能传，但**图片**每次要记三步：先转 `.bin`、再算 golden、还要保证
+ROI 三处一致。`push.py` 把这三件事一起做了：
+
+```bash
+# 一张图片 → 自动转 RGB565 + 自动算配套 golden + 传 + 核 md5
+python host/push.py 手.jpg
+
+# 指定 ROI（默认用 auto_roi 自动估算）
+python host/push.py 手.jpg --roi 160 80 320 320
+
+# 推任意文件（裸传，不转换）
+python host/push.py gesture_system.bit gesture_system.hwh
+
+# 推整个目录
+python host/push.py -r host/
+
+# 只看会做什么，不实际传
+python host/push.py 手.jpg --dry-run
+```
+
+它会：
+
+| 做 | 为什么 |
+|---|---|
+| 图片自动转 640×480 RGB565 | ⚠ 板子**不认 jpg/png**，忘了转传上去也不报格式错 |
+| 自动算配套 golden | 只传输入不传 golden，到板上没法对拍 |
+| **传完核 md5** | 传了一半 / 传了旧文件，板上跑出旧结果，现象极难追 |
+| 传完清 `__pycache__` | 脚本改了但板上是旧字节码 —— 踩过的坑 |
+
+> ⚠ **需要 ssh 免密**。提示要密码时先在 PC 上跑一次
+> `ssh-copy-id xilinx@192.168.2.99`。
+> 脚本刻意**不处理交互式密码** —— 那就不叫一键了。
+
+> ⚠ 它**不重新实现** RGB565 转换和 golden，而是 import
+> `capture_frame.py` / 调 `gesture_golden.py`。
+> 这个项目在「多份实现抄同一套错」上栽过一次（`crop_scale` 固定步长，
+> HLS/C++/Python 三份一起错），所以**转换只有一份实现**。
+
 ### 1.3 另外三种传法（按省事程度排）
 
 | 方式 | 怎么做 | 适合 |
@@ -81,7 +121,15 @@ md5sum gesture_system.bit
 
 所以「传图片」= **先在 PC 上把图片转成 `.bin`，再传 `.bin`**。
 
-### 2.1 三步
+### 2.1 ⭐ 一条命令搞定（推荐）
+
+```bash
+python host/push.py 你的图.jpg
+#   → 自动转 RGB565 .bin、自动算配套 golden、传上去、核 md5
+#   → 想指定 ROI：加 --roi 160 80 320 320
+```
+
+### 2.2 手动三步（想知道每一步在干什么时）
 
 ```bash
 # ① 在 PC 上：任意图片 → 640×480 RGB565（cover 缩放 + 居中裁剪，不会拉伸变形）
@@ -97,7 +145,7 @@ python host/gesture_golden.py --input frame.bin --roi 160 80 320 320 --out golde
 scp frame.bin golden.bin $BOARD:/home/xilinx/
 ```
 
-### 2.2 ⚠⚠ ROI 三处必须一致
+### 2.3 ⚠⚠ ROI 三处必须一致
 
 这是最容易出错、且错了以后**结果全废但不会报错**的地方：
 
@@ -109,7 +157,7 @@ scp frame.bin golden.bin $BOARD:/home/xilinx/
 
 **差一个数就是另一个答案。** 改 ROI 就必须重算 golden。
 
-### 2.3 从摄像头录一帧（可选，需要 USB 摄像头）
+### 2.4 从摄像头录一帧（可选，需要 USB 摄像头）
 
 ```bash
 # PC 上（有 UVC 摄像头）
@@ -254,7 +302,7 @@ out.tofile('/home/xilinx/hw_out.bin')
 | 只认出 `default` 一个 IP | `.bit` 与 `.hwh` 不同名/不配套 | 见 `board-bringup-guide.md` §4.0 |
 | 认到的 IP 地址全是 `0x00000000` | `print_info` 曾用 PYNQ 2.x 的 `base_addr` 键 | 已修（改用 `phys_addr`）；拉最新 `gesture_overlay.py` |
 | 改了代码但行为没变 | 加载了 `__pycache__` 里的旧字节码 | 清 `__pycache__` + 重启内核 |
-| 对拍全不一致 | ROI 三处不一致 | 见 §2.2 |
+| 对拍全不一致 | ROI 三处不一致 | 见 §2.3 |
 | DMA 只搬了前 16 KB | `C_SG_LENGTH_WIDTH` 是默认的 14 位 | 重建（`rebuild_all.sh` 会硬性校验 24） |
 
 ---
