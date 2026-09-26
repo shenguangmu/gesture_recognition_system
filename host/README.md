@@ -55,6 +55,8 @@ python capture_frame.py --camera 0 --out frame.bin
 | `gesture_golden.py` | **PC** | 预处理链的 Python 参考实现 |
 | `capture_frame.py` | **PC** | **图片 / USB 摄像头 → RGB565 `.bin`**（喂给 PL 的输入源） |
 | `push.py` | **PC** | **推文件/图片上板**：图片自动转 `.bin` + 自动配 golden + 核 md5 |
+| `auto_roi.py` | **PC + 板** | 自动估算跟随手部的 ROI（方案 B） |
+| `roi_analysis.py` | **PC** | **ROI 机制与类别可分性实测**：类内波动 / 类间差异 / 信噪比 |
 | `dump_frame.py` | **PC + 板** | 帧数据的转储、比对、出图 |
 | `gesture_overlay.py` | **板（PYNQ）** | 加载 overlay、驱动整条流水线 |
 | `usb_camera_run.py` | **板（PYNQ）** | USB(UVC) 摄像头 → PL 链（绕开 DVP 硬件） |
